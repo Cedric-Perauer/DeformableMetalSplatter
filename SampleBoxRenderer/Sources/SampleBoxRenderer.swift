@@ -1,3 +1,4 @@
+import Foundation
 import Metal
 import MetalKit
 import os
@@ -76,6 +77,10 @@ public class SampleBoxRenderer {
     var colorMap: MTLTexture
     public let maxViewCount: Int
     public let maxSimultaneousRenders: Int
+    
+    public private(set) var currentFPS: Double = 0
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
 
     var dynamicUniformBuffer: MTLBuffer
     var uniformBufferOffset = 0
@@ -243,6 +248,19 @@ public class SampleBoxRenderer {
 
         renderEncoder.popDebugGroup()
         renderEncoder.endEncoding()
+        updateFPS()
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        currentFPS = Double(fpsFrameCount) / elapsed
+        
+        
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 
     private class func buildMetalVertexDescriptor() -> MTLVertexDescriptor {

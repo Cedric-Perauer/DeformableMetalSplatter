@@ -122,11 +122,15 @@ public class SplatRenderer {
     }
     
     // Deformation Support
+    /// If true, the deformation MPSGraph uses FP16 weights/compute (casts I/O to/from FP32).
+    /// This is a major speed win on Apple GPUs, but can introduce small numeric differences.
+    public var useFP16Deformation: Bool = true
     var canonicalBuffer: MetalBuffer<CanonicalSplat>?
     var canonicalSplatBufferPrime: MetalBuffer<CanonicalSplat>?
     var sortedIndexBuffer: MetalBuffer<UInt32>?
     var deformSystem: DeformGraphSystem?
     var extractPipeline: MTLComputePipelineState?
+    var timeFillPipeline: MTLComputePipelineState?
     var applyPipeline: MTLComputePipelineState?
     
     // Intermediate Buffers
@@ -473,7 +477,7 @@ public class SplatRenderer {
         let weightsData = try Data(contentsOf: weightsURL)
         
         // Initialize the MPS deformation network
-        self.deformSystem = DeformGraphSystem(device: device)
+        self.deformSystem = DeformGraphSystem(device: device, useFP16: useFP16Deformation)
         self.deformSystem?.loadWeights(flatData: weightsData)
         self.deformSystem?.buildAndCompile()
         
@@ -481,12 +485,14 @@ public class SplatRenderer {
         let lib = self.library
         
         guard let extractFunc = lib.makeFunction(name: "extract_graph_inputs"),
+              let timeFillFunc = lib.makeFunction(name: "fill_time"),
               let applyFunc = lib.makeFunction(name: "apply_graph_outputs") else {
             print("Error: Could not find Deform.metal shader functions.")
             return
         }
 
         self.extractPipeline = try await device.makeComputePipelineState(function: extractFunc)
+        self.timeFillPipeline = try await device.makeComputePipelineState(function: timeFillFunc)
         self.applyPipeline = try await device.makeComputePipelineState(function: applyFunc)
         
         // Read canonical Gaussians using the original IO pipeline
@@ -503,6 +509,31 @@ public class SplatRenderer {
             bufDXYZ = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
             bufDRot = device.makeBuffer(length: count * 4 * 4, options: .storageModePrivate)
             bufDScale = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
+        }
+        
+        if count > 0,
+           let extractPipe = extractPipeline,
+           let cBuffer = canonicalBuffer?.buffer,
+           let bXYZ = bufXYZ,
+           let bT = bufT,
+           let queue = device.makeCommandQueue(),
+           let cmd = queue.makeCommandBuffer(),
+           let enc = cmd.makeComputeCommandEncoder() {
+            enc.label = "Init: Extract XYZ"
+            enc.setComputePipelineState(extractPipe)
+            enc.setBuffer(cBuffer, offset: 0, index: 0)
+            enc.setBuffer(bXYZ, offset: 0, index: 1)
+            enc.setBuffer(bT, offset: 0, index: 2)
+            var t: Float = 0
+            enc.setBytes(&t, length: 4, index: 3)
+            
+            let w = extractPipe.threadExecutionWidth
+            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+            enc.endEncoding()
+            
+            cmd.commit()
+            cmd.waitUntilCompleted()
         }
         
 //        guard let queue = device.makeCommandQueue(),
@@ -572,7 +603,7 @@ public class SplatRenderer {
         
         guard count > 0,
               let sys = deformSystem,
-              let extractPipe = extractPipeline,
+              let timeFillPipe = timeFillPipeline,
               let applyPipe = applyPipeline,
               let bXYZ = bufXYZ,
               let bT = bufT,
@@ -584,28 +615,28 @@ public class SplatRenderer {
             Self.log.debug("Something is missing.")
             return
         }
-        // Extract xyz from canonical Gaussians and send t
-        if let extractCmd = commandQueue.makeCommandBuffer(),
-           let enc = extractCmd.makeComputeCommandEncoder() {
-            
-            enc.label = "Update: Extract Inputs"
-            enc.setComputePipelineState(extractPipe)
-            enc.setBuffer(cBuffer, offset: 0, index: 0)
-            enc.setBuffer(bXYZ, offset: 0, index: 1)
-            enc.setBuffer(bT, offset: 0, index: 2)
+        // Fill t buffer (xyz is static and extracted once during load)
+        if let timeCmd = commandQueue.makeCommandBuffer(),
+           let enc = timeCmd.makeComputeCommandEncoder() {
+            enc.label = "Update: Fill Time"
+            enc.setComputePipelineState(timeFillPipe)
+            enc.setBuffer(bT, offset: 0, index: 0)
             var t = time
-            enc.setBytes(&t, length: 4, index: 3)
+            enc.setBytes(&t, length: 4, index: 1)
             
-            let w = extractPipe.threadExecutionWidth
+            let w = timeFillPipe.threadExecutionWidth
             enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
             enc.endEncoding()
-            
-            extractCmd.commit()
-            extractCmd.waitUntilCompleted() // CPU Wait: Ensures data is ready for Graph
+            let start = CFAbsoluteTimeGetCurrent()
+            timeCmd.commit()
+            timeCmd.waitUntilCompleted()
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            Self.log.debug("Deform fill_time: \(elapsedMs) ms")
         }
         
         // Calculate d_xyz, d_rotation, d_scaling
+        let graphStart = CFAbsoluteTimeGetCurrent()
         sys.run(commandQueue: commandQueue,
                 xyzBuffer: bXYZ,
                 tBuffer: bT,
@@ -613,6 +644,8 @@ public class SplatRenderer {
                 outRot: bDRot,
                 outScale: bDScale,
                 count: count)
+        let graphElapsedMs = (CFAbsoluteTimeGetCurrent() - graphStart) * 1000.0
+        Self.log.debug("Deform graph: \(graphElapsedMs) ms")
         
         // Apply deformation to canonical Gaussians
         if let enc = commandBuffer.makeComputeCommandEncoder() {
@@ -625,9 +658,12 @@ public class SplatRenderer {
             enc.setBuffer(splatBuffer.buffer, offset: 0, index: 4)
             
             let w = applyPipe.threadExecutionWidth
+            let applyStart = CFAbsoluteTimeGetCurrent()
             enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
             enc.endEncoding()
+            let applyElapsedMs = (CFAbsoluteTimeGetCurrent() - applyStart) * 1000.0
+            Self.log.debug("Deform apply encode: \(applyElapsedMs) ms")
         }
     }
 

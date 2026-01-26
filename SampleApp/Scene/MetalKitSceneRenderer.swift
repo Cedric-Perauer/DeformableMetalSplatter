@@ -10,7 +10,7 @@ import SwiftUI
 
 class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "MetalKitSceneRenderer",
                category: "MetalKitSceneRenderer")
 
     let metalKitView: MTKView
@@ -21,6 +21,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var modelRenderer: (any ModelRenderer)?
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
+    
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
     
     // Enable gestures
     // Drag
@@ -107,6 +110,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     func draw(in view: MTKView) {
+        updateFPS()
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
         
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -128,10 +132,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         // Deformation step
         let timeToPass: Float
+        let now = Date().timeIntervalSinceReferenceDate
         if let manualTime = manualTime {
             timeToPass = manualTime
         } else {
-            let now = Date().timeIntervalSinceReferenceDate
             let loopedTime = now.remainder(dividingBy: animationDuration)
             timeToPass = Float((loopedTime < 0 ? loopedTime + animationDuration : loopedTime) / animationDuration)
         }
@@ -155,6 +159,17 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        let fps = Double(fpsFrameCount) / elapsed
+        Self.log.debug("MTKView draw FPS: \(fps)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {

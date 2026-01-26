@@ -42,6 +42,14 @@ kernel void extract_graph_inputs(
     outT[id] = time;
 }
 
+kernel void fill_time(
+    device float* outT       [[ buffer(0) ]],
+    constant float& time     [[ buffer(1) ]],
+    uint id [[ thread_position_in_grid ]]
+) {
+    outT[id] = time;
+}
+
 // Apply d_xyz, d_rotation, d_scaling to the canonical Gaussians.
 kernel void apply_graph_outputs(
     device const CanonicalSplat* inSplats [[ buffer(0) ]],

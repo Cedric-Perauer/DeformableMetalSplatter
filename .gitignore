@@ -3,3 +3,16 @@ xcuserdata
 DerivedData/
 .swiftpm
 
+# Python
+__pycache__/
+*.pyc
+
+# Large assets / binaries (tracked via Git LFS when needed)
+*.ply
+*.pth
+*.pt
+*.bin
+*.mlmodel
+*.mlpackage/
+example_data/
+

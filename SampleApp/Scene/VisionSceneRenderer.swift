@@ -18,7 +18,7 @@ extension LayerRenderer.Clock.Instant.Duration {
 
 class VisionSceneRenderer {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "VisionSceneRenderer",
                category: "VisionSceneRenderer")
 
     let layerRenderer: LayerRenderer
@@ -29,6 +29,9 @@ class VisionSceneRenderer {
     var modelRenderer: (any ModelRenderer)?
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
+    
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
 
     var lastRotationUpdateTimestamp: Date? = nil
     var rotation: Angle = .zero
@@ -127,6 +130,7 @@ class VisionSceneRenderer {
     }
 
     func renderFrame() {
+        updateFPS()
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
         frame.startUpdate()
@@ -192,6 +196,17 @@ class VisionSceneRenderer {
                 }
             }
         }
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        let fps = Double(fpsFrameCount) / elapsed
+        Self.log.debug("Vision render FPS: \(fps)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 }
 

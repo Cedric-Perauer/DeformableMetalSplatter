@@ -6,6 +6,12 @@ import torch.nn.functional as F
 from torchinfo import summary
 import sys
 from argparse import ArgumentParser
+import time
+
+try:
+    from tqdm import tqdm
+except ImportError:  # pragma: no cover
+    tqdm = None
 
 ## Copy from https://github.com/yunjinli/TRASE/blob/master/gui_standalone.py
 ## ======= Deformable 3D Gaussian =======
@@ -59,7 +65,17 @@ class Embedder:
         return torch.cat([fn(inputs) for fn in self.embed_fns], -1)
 
 class DeformNetwork(nn.Module):
-    def __init__(self, D=8, W=256, input_ch=3, output_ch=59, multires=10, is_blender=False, is_6dof=False):
+    def __init__(
+        self,
+        D=8,
+        W=256,
+        input_ch=3,
+        output_ch=59,
+        multires=10,
+        is_blender=False,
+        is_6dof=False,
+        verbose=True,
+    ):
         super(DeformNetwork, self).__init__()
         self.D = D
         self.W = W
@@ -71,10 +87,11 @@ class DeformNetwork(nn.Module):
         self.embed_time_fn, time_input_ch = get_embedder(self.t_multires, 1)
         self.embed_fn, xyz_input_ch = get_embedder(multires, 3)
         self.input_ch = xyz_input_ch + time_input_ch
-        print(f"self.t_multires: {self.t_multires}")
-        print(f"multires: {multires}")
-        print(f"time_input_ch: {time_input_ch}")
-        print(f"xyz_input_ch: {xyz_input_ch}")
+        if verbose:
+            print(f"self.t_multires: {self.t_multires}")
+            print(f"multires: {multires}")
+            print(f"time_input_ch: {time_input_ch}")
+            print(f"xyz_input_ch: {xyz_input_ch}")
         if is_blender:
             # Better for D-NeRF Dataset
             self.time_out = 30
@@ -138,7 +155,7 @@ class DeformNetwork(nn.Module):
 def export_deform_weights(weights_path, output_path):
     D=8
     W=256
-    model = DeformNetwork(D=D, W=W)
+    model = DeformNetwork(D=D, W=W, verbose=True)
     model.load_state_dict(torch.load(weights_path, map_location=torch.device('cpu')))
     summary(model)
     
@@ -151,14 +168,96 @@ def export_deform_weights(weights_path, output_path):
         
     all_weights = np.concatenate(weights_list)
     
-    all_weights.tofile("weights.bin")
+    all_weights.tofile(output_path)
     
     print(f"Exported {len(all_weights)} weights")
 
+def run_deformnetwork_benchmark(
+    *,
+    iters: int = 50,
+    batch_size: int = 16384,
+    device: str = "cpu",
+    weights_path: str | None = None,
+):
+    """
+    Runs DeformNetwork forward pass in a loop to sanity-check performance.
+
+    Inputs:
+      - x: (B, 3)
+      - t: (B, 1)
+    """
+    dev = torch.device(device)
+    model = DeformNetwork(D=8, W=256, verbose=False).to(dev)
+    model.eval()
+
+    def _sync():
+        # Make per-iteration timing accurate on async backends.
+        if dev.type == "cuda":
+            torch.cuda.synchronize(dev)
+        elif dev.type == "mps":
+            torch.mps.synchronize()
+
+    if weights_path is not None:
+        state = torch.load(weights_path, map_location=dev)
+        model.load_state_dict(state)
+
+    x = torch.rand(batch_size, 3, device=dev, dtype=torch.float32)
+    t = torch.rand(batch_size, 1, device=dev, dtype=torch.float32)
+
+    # Small warmup so the tqdm loop is representative.
+    with torch.inference_mode():
+        for _ in range(min(5, iters)):
+            _ = model(x, t)
+
+        iterator = range(iters)
+        if tqdm is not None:
+            iterator = tqdm(iterator, total=iters, desc=f"DeformNetwork B={batch_size} ({device})")
+
+        per_iter_s: list[float] = []
+        _sync()
+        start = time.perf_counter()
+        for i in iterator:
+            _sync()
+            t0 = time.perf_counter()
+            _ = model(x, t)
+            _sync()
+            t1 = time.perf_counter()
+
+            dt = t1 - t0
+            per_iter_s.append(dt)
+            if tqdm is not None:
+                # show instantaneous + running average
+                avg_ms = 1000.0 * (sum(per_iter_s) / len(per_iter_s))
+                iterator.set_postfix_str(f"{dt*1000.0:.2f} ms/batch (avg {avg_ms:.2f})")
+
+        _sync()
+        end = time.perf_counter()
+
+    total_s = end - start
+    if total_s > 0:
+        avg_ms = 1000.0 * (sum(per_iter_s) / len(per_iter_s)) if per_iter_s else float("nan")
+        print(
+            f"Done: {iters} iters, batch={batch_size}, device={device}, "
+            f"{total_s:.3f}s total ({iters/total_s:.2f} it/s), avg {avg_ms:.2f} ms/batch"
+        )
+    else:
+        print(f"Done: {iters} iters, batch={batch_size}, device={device}")
 
 if __name__ == "__main__":
-    parser = ArgumentParser(description="Extract weights.bin from the given deform.pth")
-    parser.add_argument("--model", default='deform.pth', type=str, help="Path to deform.pth. (Default: deform.pth)")
-    parser.add_argument("--output", default='weights.bin', type=str, help="Output weights path. (Default: weights.bin)")
+    parser = ArgumentParser(description="Export deform weights, or run a DeformNetwork benchmark loop.")
+    parser.add_argument("--model", default="deform.pth", type=str, help="Path to deform.pth. (Default: deform.pth)")
+    parser.add_argument("--output", default="weights.bin", type=str, help="Output weights path. (Default: weights.bin)")
+    parser.add_argument("--benchmark", action="store_true", help="Run a forward-pass benchmark loop instead of exporting weights.")
+    parser.add_argument("--iters", default=50, type=int, help="Benchmark iterations. (Default: 50)")
+    parser.add_argument("--batch-size", default=16384, type=int, help="Benchmark batch size. (Default: 16384)")
+    parser.add_argument("--device", default="cpu", type=str, help="Benchmark device, e.g. cpu / mps / cuda. (Default: cpu)")
     args = parser.parse_args()
-    export_deform_weights(weights_path=args.model, output_path=args.output)
+    if args.benchmark:
+        run_deformnetwork_benchmark(
+            iters=args.iters,
+            batch_size=args.batch_size,
+            device=args.device,
+            weights_path=args.model if args.model else None,
+        )
+    else:
+        export_deform_weights(weights_path=args.model, output_path=args.output)
