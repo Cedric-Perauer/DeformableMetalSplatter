@@ -174,6 +174,10 @@ public class SplatRenderer {
 
     public var onSortStart: (() -> Void)?
     public var onSortComplete: ((TimeInterval) -> Void)?
+    
+    public private(set) var currentFPS: Double = 0
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
 
     private let library: MTLLibrary
     // Single-stage pipeline
@@ -789,6 +793,18 @@ public class SplatRenderer {
         }
 
         renderEncoder.endEncoding()
+        updateFPS()
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        currentFPS = Double(fpsFrameCount) / elapsed
+        Self.log.debug("Rendering FPS: \(self.currentFPS)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime
