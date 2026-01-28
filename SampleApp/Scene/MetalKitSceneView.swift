@@ -16,11 +16,30 @@ struct MetalKitSceneView: View {
     // State for the slider
     @State private var time: Float = 0.0
     @State private var isManualTime: Bool = true
+    @State private var showClusterColors: Bool = false
+    @State private var showDepthVisualization: Bool = false
+    @State private var selectedClusterID: Int32 = -1  // -1 means show all
+    @State private var clickMarkerPosition: CGPoint? = nil  // For showing picking area
 
     var body: some View {
-        ZStack(alignment: .bottom) {
-            MetalView(modelIdentifier: modelIdentifier, manualTime: isManualTime ? time : nil)
-                .ignoresSafeArea()
+        GeometryReader { geometry in
+            ZStack(alignment: .bottom) {
+                MetalView(modelIdentifier: modelIdentifier,
+                          manualTime: isManualTime ? time : nil,
+                          showClusterColors: showClusterColors,
+                          showDepthVisualization: showDepthVisualization,
+                          selectedClusterID: $selectedClusterID,
+                          clickMarkerPosition: $clickMarkerPosition)
+                    .ignoresSafeArea()
+                
+                // Red circle marker showing picking area
+                if let pos = clickMarkerPosition {
+                    Circle()
+                        .stroke(Color.red, lineWidth: 2)
+                        .frame(width: 60, height: 60)  // 30px radius = 60px diameter
+                        .position(x: pos.x, y: pos.y)
+                        .allowsHitTesting(false)
+                }
 
             // UI Overlay
             VStack(spacing: 12) {
@@ -50,9 +69,43 @@ struct MetalKitSceneView: View {
                     .padding(8)
                     .background(.ultraThinMaterial)
                     .cornerRadius(8)
+                
+                HStack {
+                    Toggle("Cluster Colors", isOn: $showClusterColors)
+                        .toggleStyle(.button)
+                    
+                    Toggle("Depth", isOn: $showDepthVisualization)
+                        .toggleStyle(.button)
+                }
+                .padding(8)
+                .background(.ultraThinMaterial)
+                .cornerRadius(8)
+                
+                // Cluster selection - always visible, click to select works in any mode
+                HStack {
+                    if selectedClusterID >= 0 {
+                        Text("Cluster: \(selectedClusterID)")
+                            .font(.system(.body, design: .monospaced))
+                            .foregroundStyle(.white)
+                        
+                        Button("Show All") {
+                            selectedClusterID = -1
+                            clickMarkerPosition = nil
+                        }
+                        .buttonStyle(.bordered)
+                    } else {
+                        Text("Click splat to isolate cluster")
+                            .font(.caption)
+                            .foregroundStyle(.white.opacity(0.8))
+                    }
+                }
+                .padding(8)
+                .background(.ultraThinMaterial)
+                .cornerRadius(8)
             }
             .padding()
             .frame(maxWidth: 400)
+            }
         }
     }
 }
@@ -60,10 +113,16 @@ struct MetalKitSceneView: View {
 private struct MetalView: ViewRepresentable {
     var modelIdentifier: ModelIdentifier?
     var manualTime: Float?
+    var showClusterColors: Bool?
+    var showDepthVisualization: Bool?
+    @Binding var selectedClusterID: Int32
+    @Binding var clickMarkerPosition: CGPoint?
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
         var startCameraDistance: Float = 0.0
+        var selectedClusterIDBinding: Binding<Int32>?
+        var clickMarkerBinding: Binding<CGPoint?>?
         
 #if os(iOS)
         @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
@@ -105,7 +164,10 @@ private struct MetalView: ViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator()
+        let coordinator = Coordinator()
+        coordinator.selectedClusterIDBinding = $selectedClusterID
+        coordinator.clickMarkerBinding = $clickMarkerPosition
+        return coordinator
     }
 
 #if os(macOS)
@@ -123,6 +185,7 @@ private struct MetalView: ViewRepresentable {
         
         // Link the view back to the renderer for input handling
         metalKitView.renderer = renderer
+        metalKitView.coordinator = context.coordinator
 
         loadModel(renderer)
 
@@ -131,14 +194,46 @@ private struct MetalView: ViewRepresentable {
 
     func updateNSView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
+        context.coordinator.selectedClusterIDBinding = $selectedClusterID
+        context.coordinator.clickMarkerBinding = $clickMarkerPosition
+        if let showClusterColors {
+            context.coordinator.renderer?.showClusterColors = showClusterColors
+        }
+        if let showDepthVisualization {
+            context.coordinator.renderer?.showDepthVisualization = showDepthVisualization
+        }
+        context.coordinator.renderer?.selectedClusterID = selectedClusterID
         updateView(context.coordinator)
     }
     
     // Custom MTKView subclass to handle Mouse/Trackpad events
     class InteractiveMTKView: MTKView {
         weak var renderer: MetalKitSceneRenderer?
+        weak var coordinator: Coordinator?
         
         override var acceptsFirstResponder: Bool { true }
+        
+        // Click: Pick cluster (works in any color mode)
+        override func mouseDown(with event: NSEvent) {
+            guard let renderer = renderer else { return }
+            
+            let location = convert(event.locationInWindow, from: nil)
+            // Flip Y for Metal coordinate system
+            let flippedY = bounds.height - location.y
+            
+            // Update marker position (use flipped Y for SwiftUI overlay which also has top-left origin)
+            coordinator?.clickMarkerBinding?.wrappedValue = CGPoint(x: location.x, y: flippedY)
+            
+            // Scale point from view coordinates (points) to drawable coordinates (pixels)
+            // This is necessary for Retina displays where drawable size != bounds size
+            let scale = window?.backingScaleFactor ?? 1.0
+            let screenPoint = CGPoint(x: location.x * scale, y: flippedY * scale)
+            
+            if let clusterID = renderer.pickClusterAt(screenPoint) {
+                coordinator?.selectedClusterIDBinding?.wrappedValue = clusterID
+                renderer.selectedClusterID = clusterID
+            }
+        }
         
         // Orbit: Left Mouse Drag
         override func mouseDragged(with event: NSEvent) {
@@ -213,6 +308,13 @@ private struct MetalView: ViewRepresentable {
     
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
+        if let showClusterColors {
+            context.coordinator.renderer?.showClusterColors = showClusterColors
+        }
+        if let showDepthVisualization {
+            context.coordinator.renderer?.showDepthVisualization = showDepthVisualization
+        }
+        context.coordinator.renderer?.selectedClusterID = selectedClusterID
         updateView(context.coordinator)
     }
 #endif // os(iOS)

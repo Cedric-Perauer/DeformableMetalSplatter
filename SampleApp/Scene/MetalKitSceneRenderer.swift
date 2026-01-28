@@ -35,6 +35,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var panX: Float = 0.0
     var panY: Float = 0.0
     public var manualTime: Float? = nil
+    public var showClusterColors: Bool = false
+    public var selectedClusterID: Int32 = -1  // -1 means show all
+    public var showDepthVisualization: Bool = false
     // Total length of the video/animation in seconds
     var animationDuration: Double = 10.0
     
@@ -66,8 +69,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                // It is a directory: Assume Deformable Scene (ply + weights)
-                try await splat.loadDeformableScene(directory: url)
+                // It is a directory: Assume Deformable Scene (ply + weights + clusters)
+                try await splat.loadDeformableSceneClusters(directory: url)
             } else {
                 // It is a file: Standard Static Scene
                 try await splat.read(from: url)
@@ -141,6 +144,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         }
         
         if let splatRenderer = modelRenderer as? SplatRenderer {
+            splatRenderer.useClusterColors = showClusterColors
+            splatRenderer.selectedClusterID = selectedClusterID
+            splatRenderer.useDepthVisualization = showDepthVisualization
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
         }
 
@@ -174,6 +180,29 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         drawableSize = size
+    }
+    
+    /// Pick the cluster at a screen position. Returns the cluster ID or nil if nothing was hit.
+    func pickClusterAt(_ screenPoint: CGPoint) -> Int32? {
+        guard let splatRenderer = modelRenderer as? SplatRenderer else {
+            return nil
+        }
+        
+        // Use the same viewport as rendering
+        let viewportDesc = self.viewport
+        
+        let clusterID = splatRenderer.pickCluster(
+            at: screenPoint,
+            viewportSize: drawableSize,
+            viewport: SplatRenderer.ViewportDescriptor(
+                viewport: viewportDesc.viewport,
+                projectionMatrix: viewportDesc.projectionMatrix,
+                viewMatrix: viewportDesc.viewMatrix,
+                screenSize: viewportDesc.screenSize
+            )
+        )
+        
+        return clusterID >= 0 ? clusterID : nil
     }
 }
 

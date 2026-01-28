@@ -75,8 +75,21 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
 
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
-                       uint relativeVertexIndex) {
+                       uint relativeVertexIndex,
+                       uint splatIndex,
+                       constant packed_float3 *clusterColors,
+                       constant uint *clusterIDs) {
     FragmentIn out;
+    
+    // Filter by selected cluster - cull splats not in the selected cluster
+    if (uniforms.selectedClusterID >= 0 && clusterIDs != nullptr) {
+        uint thisClusterID = clusterIDs[splatIndex];
+        if (int(thisClusterID) != uniforms.selectedClusterID) {
+            out.position = float4(2, 2, 0, 1);  // Off-screen = culled
+            out.color = half4(0);
+            return out;
+        }
+    }
 
     float4 viewPosition4 = uniforms.viewMatrix * float4(splat.position, 1);
     float3 viewPosition3 = viewPosition4.xyz;
@@ -116,6 +129,26 @@ FragmentIn splatVertex(Splat splat,
                           projectedCenter.w);
     out.relativePosition = kBoundsRadius * relativeCoordinates;
     out.color = splat.color;
+    
+    // Depth visualization takes priority
+    if (uniforms.showDepthVisualization != 0) {
+        // Calculate view-space depth
+        float depth = -viewPosition3.z;  // Positive depth
+        
+        // Normalize to [0, 1] based on depth range
+        float t = saturate((depth - uniforms.depthRange.x) / (uniforms.depthRange.y - uniforms.depthRange.x));
+        
+        // Yellow to Red colormap (near = yellow, far = red)
+        float3 rgb;
+        rgb.r = 1.0;                    // Red always 1
+        rgb.g = 1.0 - t;                // Green fades from 1 (yellow) to 0 (red)
+        rgb.b = 0.0;                    // No blue
+        
+        out.color = half4(half3(rgb), splat.color.a);
+    } else if (uniforms.showClusterColors != 0 && clusterColors != nullptr) {
+        half3 clusterColor = half3(clusterColors[splatIndex]);
+        out.color = half4(clusterColor, splat.color.a);
+    }
     return out;
 }
 
