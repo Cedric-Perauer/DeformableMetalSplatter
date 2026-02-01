@@ -15,7 +15,8 @@ Please follow the steps in original [README](./README_Orig.md) to setup the proj
 - [x] Half precision inference for the MLP
 - [x] Adding different rendering mode (depth ✅, instances ✅) -> no class support right now
 - [x] Adding support to click objects
-- [ ] add option to not use instance mode if clusters file is not provided
+- [ ] add option to not use instance mode if clusters 
+file is not provided
 - [ ] add optional speedup via static vs dynamic splat masking
 - [ ] Update BibTex after 3DV proceedings are published 
 
@@ -48,15 +49,15 @@ python export_clusters_bin.py --model <clusters.pt> --output <path to clusters o
 
 # Demo
 
-## Dynamic Splats on Iphone 15
+## Dynamic Splats on iPhone 15
 
 https://github.com/user-attachments/assets/fee3bc1f-168a-4adb-b358-5274d74e6000
 
-## Dynamic Splats + Instances on Iphone 17 Air 
+## Dynamic Splats + Instances on iPhone 17 Air 
 
 <video src="assets/Iphone_sear_stake.mp4" controls width="600"></video>
 
-## Dynamic Splats + Instances on Ipad Pro (M1)
+## Dynamic Splats + Instances on iPad Pro (M1)
 
 <video src="assets/ipad_split_cookie.mp4" controls width="600"></video>
 
