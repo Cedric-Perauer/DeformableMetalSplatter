@@ -37,6 +37,11 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var showClusterColors: Bool = false
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
+    
+    /// Returns true if cluster data is available for this scene
+    public var hasClusters: Bool {
+        (modelRenderer as? SplatRenderer)?.hasClusters ?? false
+    }
     // Coordinate system mode: 0=default, 1=rotate X -90°, 2=rotate X +90°, 3=no rotation
     public var coordinateMode: Int = 0
     // Total length of the video/animation in seconds

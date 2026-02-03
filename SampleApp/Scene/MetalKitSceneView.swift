@@ -21,6 +21,7 @@ struct MetalKitSceneView: View {
     @State private var selectedClusterID: Int32 = -1  // -1 means show all
     @State private var showControls: Bool = false  // Controls hidden by default on phone
     @State private var coordinateMode: Int = 0  // 0=default, 1=Z-up→Y-up, 2=flip, 3=none
+    @State private var hasClusters: Bool = false  // Whether clusters.bin was loaded
     
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
 
@@ -32,8 +33,15 @@ struct MetalKitSceneView: View {
                           showClusterColors: showClusterColors,
                           showDepthVisualization: showDepthVisualization,
                           selectedClusterID: $selectedClusterID,
-                          coordinateMode: coordinateMode)
+                          coordinateMode: coordinateMode,
+                          hasClusters: $hasClusters)
                     .ignoresSafeArea()
+                    .onChange(of: hasClusters) { _, newValue in
+                        // Auto-disable cluster colors if clusters become unavailable
+                        if !newValue && showClusterColors {
+                            showClusterColors = false
+                        }
+                    }
 
             // UI Overlay
             VStack(spacing: 8) {
@@ -71,26 +79,40 @@ struct MetalKitSceneView: View {
                 // Collapsible controls section
                 if showControls {
                     VStack(spacing: 8) {
-                        HStack {
-                            Toggle("Cluster Colors", isOn: Binding(
-                                get: { showClusterColors },
-                                set: { newValue in
-                                    showClusterColors = newValue
-                                    if newValue { showDepthVisualization = false }
-                                }
-                            ))
-                                .toggleStyle(.button)
-                                .font(.caption)
+                        VStack(spacing: 4) {
+                            HStack {
+                                Toggle("Cluster Colors", isOn: Binding(
+                                    get: { showClusterColors },
+                                    set: { newValue in
+                                        showClusterColors = newValue
+                                        if newValue { showDepthVisualization = false }
+                                    }
+                                ))
+                                    .toggleStyle(.button)
+                                    .font(.caption)
+                                    .disabled(!hasClusters)
+                                
+                                Toggle("Depth", isOn: Binding(
+                                    get: { showDepthVisualization },
+                                    set: { newValue in
+                                        showDepthVisualization = newValue
+                                        if newValue { showClusterColors = false }
+                                    }
+                                ))
+                                    .toggleStyle(.button)
+                                    .font(.caption)
+                            }
                             
-                            Toggle("Depth", isOn: Binding(
-                                get: { showDepthVisualization },
-                                set: { newValue in
-                                    showDepthVisualization = newValue
-                                    if newValue { showClusterColors = false }
+                            // Warning when clusters.bin is not available
+                            if !hasClusters {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.yellow)
+                                    Text("clusters.bin not found")
+                                        .foregroundStyle(.white.opacity(0.8))
                                 }
-                            ))
-                                .toggleStyle(.button)
-                                .font(.caption)
+                                .font(.caption2)
+                            }
                         }
                         .padding(8)
                         .background(.ultraThinMaterial)
@@ -165,11 +187,13 @@ private struct MetalView: ViewRepresentable {
     var showDepthVisualization: Bool?
     @Binding var selectedClusterID: Int32
     var coordinateMode: Int
+    @Binding var hasClusters: Bool
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
         var startCameraDistance: Float = 0.0
         var selectedClusterIDBinding: Binding<Int32>?
+        var hasClustersBinding: Binding<Bool>?
         
 #if os(iOS)
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
@@ -239,6 +263,7 @@ private struct MetalView: ViewRepresentable {
     func makeCoordinator() -> Coordinator {
         let coordinator = Coordinator()
         coordinator.selectedClusterIDBinding = $selectedClusterID
+        coordinator.hasClustersBinding = $hasClusters
         return coordinator
     }
 
@@ -259,7 +284,7 @@ private struct MetalView: ViewRepresentable {
         metalKitView.renderer = renderer
         metalKitView.coordinator = context.coordinator
 
-        loadModel(renderer)
+        loadModel(renderer, coordinator: context.coordinator)
 
         return metalKitView
     }
@@ -267,6 +292,7 @@ private struct MetalView: ViewRepresentable {
     func updateNSView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
         context.coordinator.selectedClusterIDBinding = $selectedClusterID
+        context.coordinator.hasClustersBinding = $hasClusters
         if let showClusterColors {
             context.coordinator.renderer?.showClusterColors = showClusterColors
         }
@@ -275,6 +301,10 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
+        // Update hasClusters state from renderer
+        if let renderer = context.coordinator.renderer {
+            context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
+        }
         updateView(context.coordinator)
     }
     
@@ -380,13 +410,14 @@ private struct MetalView: ViewRepresentable {
         metalKitView.addGestureRecognizer(panGesture)
         metalKitView.addGestureRecognizer(pinchGesture)
 
-        loadModel(renderer)
+        loadModel(renderer, coordinator: context.coordinator)
         
         return metalKitView
     }
     
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
+        context.coordinator.hasClustersBinding = $hasClusters
         if let showClusterColors {
             context.coordinator.renderer?.showClusterColors = showClusterColors
         }
@@ -395,15 +426,21 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
+        // Update hasClusters state from renderer
+        if let renderer = context.coordinator.renderer {
+            context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
+        }
         updateView(context.coordinator)
     }
 #endif // os(iOS)
 
-    private func loadModel(_ renderer: MetalKitSceneRenderer?) {
-        Task {
+    private func loadModel(_ renderer: MetalKitSceneRenderer?, coordinator: Coordinator) {
+        Task { @MainActor in
             do {
                 if let modelIdentifier = modelIdentifier {
                     try await renderer?.load(modelIdentifier)
+                    // Update hasClusters after load completes
+                    coordinator.hasClustersBinding?.wrappedValue = renderer?.hasClusters ?? false
                 }
             } catch {
                 print("Error loading model: \(error.localizedDescription)")
@@ -413,10 +450,12 @@ private struct MetalView: ViewRepresentable {
     
     private func updateView(_ coordinator: Coordinator) {
         guard let renderer = coordinator.renderer else { return }
-        Task {
+        Task { @MainActor in
             do {
                 if let modelIdentifier = modelIdentifier {
                     try await renderer.load(modelIdentifier)
+                    // Update hasClusters after load completes
+                    coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
                 }
             } catch {
                 print("Error loading model: \(error.localizedDescription)")

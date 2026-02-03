@@ -15,9 +15,8 @@ Please follow the steps in original [README](./README_Orig.md) to setup the proj
 - [x] Half precision inference for the MLP
 - [x] Adding different rendering mode (depth ✅, instances ✅) -> no class support right now
 - [x] Adding support to click objects
-- [ ] add option to not use instance mode if clusters 
-file is not provided
-- [ ] add optional speedup via static vs dynamic splat masking
+- [x] add option to not use instance mode if clusters file is not provided (toggle disabled + warning shown)
+- [ ] add optional speedup via static vs dynamic splat masking (export_static_mask.py ready, Swift integration pending)
 - [ ] Update BibTex after 3DV proceedings are published 
 
 # Usage
@@ -42,8 +41,26 @@ python export_deform_weights.py --model <path-to-deform.pth> --output <path to d
 
 Train your scene with [TRASE](https://github.com/yunjinli/TRASE) and run the export script : 
 ```bash 
-python export_clusters_bin.py --model <clusters.pt> --output <path to clusters output.bin>
+python export_clusters_bin.py <clusters.pt> <path to clusters output.bin>
 ```
+
+3) Optionally for static splat masking (speedup by skipping deformation on static splats):
+
+Analyze which splats are static vs dynamic across all timesteps:
+```bash 
+python export_static_mask.py --ply <point_cloud.ply> --model <deform.pth> --output <static_mask.bin>
+```
+
+Options:
+- `--threshold 0.005`: Motion threshold below which splats are considered static (default: 0.005)
+- `--timesteps 20`: Number of timesteps to sample for motion analysis (default: 20)
+- `--device mps`: Use GPU acceleration (mps for Apple Silicon, cuda for NVIDIA)
+- `--auto-threshold`: Automatically determine threshold based on motion distribution
+- `--auto-percentile 25`: Percentile to use for auto-threshold (default: 25th percentile)
+
+The script outputs:
+- `static_mask.bin`: Binary mask file to load in the app
+- `static_mask.txt`: Human-readable analysis summary with statistics
 
 
 

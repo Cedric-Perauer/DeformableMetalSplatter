@@ -136,6 +136,11 @@ public class SplatRenderer {
     public var useFP16Deformation: Bool = true
     public var useClusterColors: Bool = false
     public var selectedClusterID: Int32 = -1  // -1 means show all clusters
+    
+    /// Returns true if cluster data (clusters.bin) was successfully loaded
+    public var hasClusters: Bool {
+        clusterColorBuffer != nil && clusterIdBuffer != nil
+    }
     public var useDepthVisualization: Bool = false
     private var currentDepthRange: SIMD2<Float> = SIMD2(0.1, 10.0)  // Default near/far
     var canonicalBuffer: MetalBuffer<CanonicalSplat>?
