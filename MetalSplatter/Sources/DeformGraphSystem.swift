@@ -188,6 +188,8 @@ public class DeformGraphSystem {
         return MPSGraphTensorData(ndArray)
     }
     
+    private var didPrintDebug = false
+    
     public func run(commandQueue: MTLCommandQueue,
                     xyzBuffer: MTLBuffer,
                     tBuffer: MTLBuffer,
@@ -200,6 +202,26 @@ public class DeformGraphSystem {
         let totalStart = CFAbsoluteTimeGetCurrent()
         let floatSize = MemoryLayout<Float>.size
         let numBatches = (count + SAFE_BATCH_SIZE - 1) / SAFE_BATCH_SIZE
+        
+        // Debug: Print feed and target tensor info once
+        if !didPrintDebug {
+            didPrintDebug = true
+            print("=== DeformGraphSystem Debug ===")
+            print("useFP16: \(useFP16), flatten: \(flatten)")
+            if let feedTensors = exec.feedTensors {
+                print("Feed tensors (\(feedTensors.count)):")
+                for (i, tensor) in feedTensors.enumerated() {
+                    print("  [\(i)] op='\(tensor.operation.name ?? "nil")', shape=\(tensor.shape ?? [])")
+                }
+            }
+            if let targetTensors = exec.targetTensors {
+                print("Target tensors (\(targetTensors.count)):")
+                for (i, tensor) in targetTensors.enumerated() {
+                    print("  [\(i)] op='\(tensor.operation.name ?? "nil")', shape=\(tensor.shape ?? [])")
+                }
+            }
+            print("================================")
+        }
 
         for i in stride(from: 0, to: count, by: SAFE_BATCH_SIZE) {
             autoreleasepool {
@@ -245,15 +267,31 @@ public class DeformGraphSystem {
                 
                 if let feedTensors = exec.feedTensors {
                     for tensor in feedTensors {
-                        let opName = tensor.operation.name
-                        if opName == "in_xyz" { inputsArray.append(xyzData) }
-                        else if opName == "in_t" { inputsArray.append(tData) }
-                        // Fallback: Check standard names just in case
-                        else if opName == "in_xyz_flat" { inputsArray.append(xyzData) }
-                        else if opName == "in_t_flat" { inputsArray.append(tData) }
-                        // Fallback: Check shape size
-                        else if (tensor.shape?[1].intValue ?? 0) == 3 { inputsArray.append(xyzData) }
-                        else { inputsArray.append(tData) }
+                        let opName = tensor.operation.name ?? ""
+                        // Match by operation name - check for xyz or t in the name
+                        if opName.contains("xyz") { 
+                            inputsArray.append(xyzData) 
+                        }
+                        else if opName.contains("t") && !opName.contains("xyz") { 
+                            inputsArray.append(tData) 
+                        }
+                        // Fallback: Check shape size for non-flatten mode
+                        else if !self.flatten, let shape = tensor.shape, shape.count > 1 {
+                            if shape[1].intValue == 3 { inputsArray.append(xyzData) }
+                            else { inputsArray.append(tData) }
+                        }
+                        // Fallback for flatten mode: check 1D shape
+                        else if self.flatten, let shape = tensor.shape, shape.count == 1 {
+                            // xyz has 3x the count of t
+                            let size = shape[0].intValue
+                            if size == currentCount * 3 { inputsArray.append(xyzData) }
+                            else { inputsArray.append(tData) }
+                        }
+                        else {
+                            // Last resort - assume first is xyz, second is t based on order
+                            print("WARNING: Could not determine tensor type for '\(opName)', shape: \(tensor.shape ?? [])")
+                            inputsArray.append(inputsArray.isEmpty ? xyzData : tData)
+                        }
                     }
                 }
 
@@ -304,5 +342,196 @@ public class DeformGraphSystem {
         out = graph.addition(out, b, name: nil)
         if activation { out = graph.reLU(with: out, name: nil) }
         return out
+    }
+    
+    // MARK: - Test Vector Comparison
+    
+    /// Test vector structure matching the Python-generated test_vectors.bin format
+    public struct TestVector {
+        public var xyz: SIMD3<Float>
+        public var t: Float
+        public var expectedDXYZ: SIMD3<Float>
+        public var expectedDRot: SIMD4<Float>
+        public var expectedDScale: SIMD3<Float>
+    }
+    
+    /// Load test vectors from a binary file
+    public static func loadTestVectors(from url: URL) -> [TestVector]? {
+        guard let data = try? Data(contentsOf: url) else {
+            print("Failed to read test vectors from \(url)")
+            return nil
+        }
+        
+        let floatSize = MemoryLayout<Float>.size
+        var offset = 0
+        
+        // Read count (uint32)
+        guard data.count >= 4 else { return nil }
+        let count: UInt32 = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: UInt32.self) }
+        offset += 4
+        
+        // Each sample: 3 (xyz) + 1 (t) + 3 (d_xyz) + 4 (d_rot) + 3 (d_scale) = 14 floats
+        let sampleSize = 14 * floatSize
+        guard data.count >= 4 + Int(count) * sampleSize else {
+            print("Test vectors file too small: expected \(4 + Int(count) * sampleSize), got \(data.count)")
+            return nil
+        }
+        
+        var vectors: [TestVector] = []
+        
+        for _ in 0..<count {
+            let xyz = SIMD3<Float>(
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + floatSize, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + 2 * floatSize, as: Float.self) }
+            )
+            offset += 3 * floatSize
+            
+            let t = data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) }
+            offset += floatSize
+            
+            let dXYZ = SIMD3<Float>(
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + floatSize, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + 2 * floatSize, as: Float.self) }
+            )
+            offset += 3 * floatSize
+            
+            let dRot = SIMD4<Float>(
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + floatSize, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + 2 * floatSize, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + 3 * floatSize, as: Float.self) }
+            )
+            offset += 4 * floatSize
+            
+            let dScale = SIMD3<Float>(
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + floatSize, as: Float.self) },
+                data.withUnsafeBytes { $0.load(fromByteOffset: offset + 2 * floatSize, as: Float.self) }
+            )
+            offset += 3 * floatSize
+            
+            vectors.append(TestVector(
+                xyz: xyz,
+                t: t,
+                expectedDXYZ: dXYZ,
+                expectedDRot: dRot,
+                expectedDScale: dScale
+            ))
+        }
+        
+        print("Loaded \(vectors.count) test vectors")
+        return vectors
+    }
+    
+    /// Run MPS graph on test vectors and compare with expected outputs
+    public func runTestComparison(testVectors: [TestVector], commandQueue: MTLCommandQueue) {
+        guard !testVectors.isEmpty else {
+            print("No test vectors to compare")
+            return
+        }
+        
+        let count = testVectors.count
+        let floatSize = MemoryLayout<Float>.size
+        
+        // Allocate buffers
+        guard let xyzBuffer = device.makeBuffer(length: count * 3 * floatSize, options: .storageModeShared),
+              let tBuffer = device.makeBuffer(length: count * floatSize, options: .storageModeShared),
+              let outXYZBuffer = device.makeBuffer(length: count * 3 * floatSize, options: .storageModeShared),
+              let outRotBuffer = device.makeBuffer(length: count * 4 * floatSize, options: .storageModeShared),
+              let outScaleBuffer = device.makeBuffer(length: count * 3 * floatSize, options: .storageModeShared) else {
+            print("Failed to allocate test buffers")
+            return
+        }
+        
+        // Fill input buffers
+        let xyzPtr = xyzBuffer.contents().bindMemory(to: Float.self, capacity: count * 3)
+        let tPtr = tBuffer.contents().bindMemory(to: Float.self, capacity: count)
+        
+        for (i, vec) in testVectors.enumerated() {
+            xyzPtr[i * 3 + 0] = vec.xyz.x
+            xyzPtr[i * 3 + 1] = vec.xyz.y
+            xyzPtr[i * 3 + 2] = vec.xyz.z
+            tPtr[i] = vec.t
+        }
+        
+        // Run MPS graph
+        print("\n=== Running MPS Graph Comparison Test ===")
+        print("Testing \(count) vectors...")
+        
+        run(commandQueue: commandQueue,
+            xyzBuffer: xyzBuffer,
+            tBuffer: tBuffer,
+            outXYZ: outXYZBuffer,
+            outRot: outRotBuffer,
+            outScale: outScaleBuffer,
+            count: count)
+        
+        // Read outputs
+        let outXYZPtr = outXYZBuffer.contents().bindMemory(to: Float.self, capacity: count * 3)
+        let outRotPtr = outRotBuffer.contents().bindMemory(to: Float.self, capacity: count * 4)
+        let outScalePtr = outScaleBuffer.contents().bindMemory(to: Float.self, capacity: count * 3)
+        
+        // Compare
+        var maxDiffXYZ: Float = 0
+        var maxDiffRot: Float = 0
+        var maxDiffScale: Float = 0
+        var totalDiffXYZ: Float = 0
+        var totalDiffRot: Float = 0
+        var totalDiffScale: Float = 0
+        
+        print("\nFirst 10 comparisons:")
+        print(String(repeating: "-", count: 120))
+        
+        for (i, vec) in testVectors.enumerated() {
+            let mpsXYZ = SIMD3<Float>(outXYZPtr[i*3+0], outXYZPtr[i*3+1], outXYZPtr[i*3+2])
+            let mpsRot = SIMD4<Float>(outRotPtr[i*4+0], outRotPtr[i*4+1], outRotPtr[i*4+2], outRotPtr[i*4+3])
+            let mpsScale = SIMD3<Float>(outScalePtr[i*3+0], outScalePtr[i*3+1], outScalePtr[i*3+2])
+            
+            let diffXYZ = abs(mpsXYZ - vec.expectedDXYZ)
+            let diffRot = abs(mpsRot - vec.expectedDRot)
+            let diffScale = abs(mpsScale - vec.expectedDScale)
+            
+            let maxDX = max(diffXYZ.x, max(diffXYZ.y, diffXYZ.z))
+            let maxDR = max(diffRot.x, max(diffRot.y, max(diffRot.z, diffRot.w)))
+            let maxDS = max(diffScale.x, max(diffScale.y, diffScale.z))
+            
+            maxDiffXYZ = max(maxDiffXYZ, maxDX)
+            maxDiffRot = max(maxDiffRot, maxDR)
+            maxDiffScale = max(maxDiffScale, maxDS)
+            
+            totalDiffXYZ += diffXYZ.x + diffXYZ.y + diffXYZ.z
+            totalDiffRot += diffRot.x + diffRot.y + diffRot.z + diffRot.w
+            totalDiffScale += diffScale.x + diffScale.y + diffScale.z
+            
+            if i < 10 {
+                print("[\(i)] xyz=(\(String(format: "%.4f", vec.xyz.x)), \(String(format: "%.4f", vec.xyz.y)), \(String(format: "%.4f", vec.xyz.z))), t=\(String(format: "%.4f", vec.t))")
+                print("     Expected d_xyz: (\(String(format: "%.6f", vec.expectedDXYZ.x)), \(String(format: "%.6f", vec.expectedDXYZ.y)), \(String(format: "%.6f", vec.expectedDXYZ.z)))")
+                print("     MPS      d_xyz: (\(String(format: "%.6f", mpsXYZ.x)), \(String(format: "%.6f", mpsXYZ.y)), \(String(format: "%.6f", mpsXYZ.z)))")
+                print("     Diff:           (\(String(format: "%.2e", diffXYZ.x)), \(String(format: "%.2e", diffXYZ.y)), \(String(format: "%.2e", diffXYZ.z)))")
+                print("     Expected d_rot: (\(String(format: "%.6f", vec.expectedDRot.x)), \(String(format: "%.6f", vec.expectedDRot.y)), \(String(format: "%.6f", vec.expectedDRot.z)), \(String(format: "%.6f", vec.expectedDRot.w)))")
+                print("     MPS      d_rot: (\(String(format: "%.6f", mpsRot.x)), \(String(format: "%.6f", mpsRot.y)), \(String(format: "%.6f", mpsRot.z)), \(String(format: "%.6f", mpsRot.w)))")
+                print("")
+            }
+        }
+        
+        print(String(repeating: "=", count: 120))
+        print("SUMMARY:")
+        print("  Max diff d_xyz:   \(String(format: "%.2e", maxDiffXYZ))")
+        print("  Max diff d_rot:   \(String(format: "%.2e", maxDiffRot))")
+        print("  Max diff d_scale: \(String(format: "%.2e", maxDiffScale))")
+        print("  Avg diff d_xyz:   \(String(format: "%.2e", totalDiffXYZ / Float(count * 3)))")
+        print("  Avg diff d_rot:   \(String(format: "%.2e", totalDiffRot / Float(count * 4)))")
+        print("  Avg diff d_scale: \(String(format: "%.2e", totalDiffScale / Float(count * 3)))")
+        
+        let tolerance: Float = 1e-4
+        if maxDiffXYZ < tolerance && maxDiffRot < tolerance && maxDiffScale < tolerance {
+            print("\n✓ PASS: MPS output matches PyTorch within tolerance (\(tolerance))")
+        } else {
+            print("\n✗ FAIL: MPS output differs from PyTorch!")
+            print("  This indicates a bug in the MPS graph implementation.")
+        }
+        print(String(repeating: "=", count: 120))
     }
 }

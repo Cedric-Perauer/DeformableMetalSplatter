@@ -128,12 +128,16 @@ public class SplatRenderer {
         var rotationZ: Float
         var rotationW: Float
         var scale: MTLPackedFloat3
+        // Pre-computed covariance (same formula as Splat init)
+        // This ensures t=0 output matches direct PLY loading exactly
+        var covA: PackedHalf3  // (cov[0,0], cov[0,1], cov[0,2])
+        var covB: PackedHalf3  // (cov[1,1], cov[1,2], cov[2,2])
     }
     
     // Deformation Support
     /// If true, the deformation MPSGraph uses FP16 weights/compute (casts I/O to/from FP32).
     /// This is a major speed win on Apple GPUs, but can introduce small numeric differences.
-    public var useFP16Deformation: Bool = true
+    public var useFP16Deformation: Bool = false
     public var useClusterColors: Bool = false
     public var selectedClusterID: Int32 = -1  // -1 means show all clusters
     
@@ -161,7 +165,11 @@ public class SplatRenderer {
     var clusterColorBuffer: MTLBuffer?
     private let emptyClusterColorBuffer: MTLBuffer
     private let emptyClusterIdBuffer: MTLBuffer
-    private var lastDeformationTime: Float = -1.0
+    private var lastDeformationTime: Float = 0.0  // Start at 0 so first frame at t=0 skips deformation
+    
+    /// Backup of the original Swift-computed splat data (from read())
+    /// Used to restore exact values when returning to t=0
+    private var originalSplatBuffer: MetalBuffer<Splat>?
     
     // Picking support (screen-space based)
     private var maxClusterID: UInt32 = 0
@@ -663,6 +671,35 @@ public class SplatRenderer {
 
         canonicalBuffer!.append(newPoints.points.map { CanonicalSplat($0) })
     }
+    
+    /// Creates a backup of the current splatBuffer so it can be restored when returning to t=0
+    private func backupOriginalSplats() {
+        guard splatBuffer.count > 0 else { return }
+        
+        do {
+            originalSplatBuffer = try MetalBuffer(device: device, capacity: splatBuffer.count)
+            // Copy all splat data
+            memcpy(originalSplatBuffer!.values, splatBuffer.values, MemoryLayout<Splat>.stride * splatBuffer.count)
+            originalSplatBuffer!.count = splatBuffer.count
+            Self.log.info("Backed up \(self.splatBuffer.count) original splats for t=0 restoration")
+        } catch {
+            Self.log.error("Failed to create backup buffer: \(error)")
+        }
+    }
+    
+    /// Restores the original Swift-computed splat data (for t=0)
+    private func restoreOriginalSplats() {
+        guard let original = originalSplatBuffer, original.count > 0 else { return }
+        guard original.count == splatBuffer.count else {
+            Self.log.warning("Original splat count mismatch, cannot restore")
+            return
+        }
+        
+        // Copy back the original data
+        memcpy(splatBuffer.values, original.values, MemoryLayout<Splat>.stride * original.count)
+        Self.log.debug("Restored original splats for t=0")
+    }
+    
     public func loadDeformableScene(directory: URL) async throws {
         // When selecting a whole directory as input,
         // automatically consider as loading a dynamic scene.
@@ -696,6 +733,9 @@ public class SplatRenderer {
         // Read canonical Gaussians using the original IO pipeline
         try await readCanonical(from: plyURL)
         try await read(from: plyURL)
+        
+        // Backup original splat data so we can restore when returning to t=0
+        backupOriginalSplats()
         
         guard canonicalBuffer!.count == splatBuffer.count else {return}
         // Allocate Buffers
@@ -736,8 +776,32 @@ public class SplatRenderer {
         
 
         print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
+        
+        // Run test comparison if test_vectors.bin exists
+        runDeformTestIfAvailable(directory: directory)
     }
-
+    
+    /// Run deformation network test comparison if test_vectors.bin is present
+    private func runDeformTestIfAvailable(directory: URL) {
+        let testVectorsURL = directory.appendingPathComponent("test_vectors.bin")
+        guard FileManager.default.fileExists(atPath: testVectorsURL.path) else {
+            print("No test_vectors.bin found - skipping MPS comparison test")
+            return
+        }
+        
+        guard let testVectors = DeformGraphSystem.loadTestVectors(from: testVectorsURL) else {
+            print("Failed to load test vectors")
+            return
+        }
+        
+        guard let deformSystem = self.deformSystem,
+              let commandQueue = device.makeCommandQueue() else {
+            print("Deform system not ready for testing")
+            return
+        }
+        
+        deformSystem.runTestComparison(testVectors: testVectors, commandQueue: commandQueue)
+    }
 
     public func loadDeformableSceneClusters(directory: URL) async throws {
         // When selecting a whole directory as input,
@@ -773,6 +837,9 @@ public class SplatRenderer {
         // Read canonical Gaussians using the original IO pipeline
         try await readCanonical(from: plyURL)
         try await read(from: plyURL)
+        
+        // Backup original splat data so we can restore when returning to t=0
+        backupOriginalSplats()
         
         guard canonicalBuffer!.count == splatBuffer.count else {return}
         // Allocate Buffers
@@ -815,6 +882,9 @@ public class SplatRenderer {
         loadClustersBin(from: clustersURL, expectedCount: count)
         
         print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
+        
+        // Run test comparison if test_vectors.bin exists
+        runDeformTestIfAvailable(directory: directory)
     }
 
     private func loadClustersBin(from url: URL, expectedCount: Int) {
@@ -922,6 +992,14 @@ public class SplatRenderer {
     public func update(time: Float, commandBuffer: MTLCommandBuffer) {
         // Check if time changed significantly
         if abs(time - lastDeformationTime) < 0.001 { return }
+        
+        // If returning to t=0, restore the original Swift-computed splat data
+        // This ensures t=0 always matches direct PLY loading exactly
+        if time < 0.001 {
+            restoreOriginalSplats()
+            lastDeformationTime = time
+            return
+        }
         
         Self.log.debug("Deformation time: \(time)")
         lastDeformationTime = time
@@ -1326,13 +1404,17 @@ extension SplatRenderer.CanonicalSplat {
     init(_ splat: SplatScenePoint) {
         self.init(position: splat.position,
                   color: .init(splat.color.asLinearFloat.sRGBToLinear, splat.opacity.asLinearFloat),
-                  scale: splat.scale.asLinearFloat,
+                  // Use asExponent to keep scale in log-space, since the Metal shader does exp(scale)
+                  logScale: splat.scale.asExponent,
+                  // Use linear scale for covariance computation (same as Splat init)
+                  linearScale: splat.scale.asLinearFloat,
                   rotation: splat.rotation.normalized)
     }
 
     init(position: SIMD3<Float>,
          color: SIMD4<Float>,
-         scale: SIMD3<Float>,
+         logScale: SIMD3<Float>,
+         linearScale: SIMD3<Float>,
          rotation: simd_quatf) {
         
         self.position = MTLPackedFloat3Make(position.x, position.y, position.z)
@@ -1344,12 +1426,19 @@ extension SplatRenderer.CanonicalSplat {
             a: Float16(color.w)
         )
         
-        self.scale = MTLPackedFloat3Make(scale.x, scale.y, scale.z)
-//        self.rotation = SIMD4<Float>(rotation.imag.x, rotation.imag.y, rotation.imag.z, rotation.real)
-        self.rotationX = rotation.imag.x;
-        self.rotationY = rotation.imag.y;
-        self.rotationZ = rotation.imag.z;
-        self.rotationW = rotation.real;
+        // scale is stored in log-space (exponent form) for deformation
+        self.scale = MTLPackedFloat3Make(logScale.x, logScale.y, logScale.z)
+        self.rotationX = rotation.imag.x
+        self.rotationY = rotation.imag.y
+        self.rotationZ = rotation.imag.z
+        self.rotationW = rotation.real
+        
+        // Compute covariance using the same formula as Splat init
+        // This ensures t=0 output matches direct PLY loading exactly
+        let transform = simd_float3x3(rotation) * simd_float3x3(diagonal: linearScale)
+        let cov3D = transform * transform.transpose
+        self.covA = SplatRenderer.PackedHalf3(x: Float16(cov3D[0, 0]), y: Float16(cov3D[0, 1]), z: Float16(cov3D[0, 2]))
+        self.covB = SplatRenderer.PackedHalf3(x: Float16(cov3D[1, 1]), y: Float16(cov3D[1, 2]), z: Float16(cov3D[2, 2]))
     }
 }
 
