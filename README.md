@@ -52,7 +52,11 @@ https://github.com/user-attachments/assets/fee3bc1f-168a-4adb-b358-5274d74e6000
 
 ## Dynamic Splats + Instances on iPhone 17 Air 
 
-https://github.com/user-attachments/assets/1a5fb089-37c0-448d-b66c-7f5caca9dfd9
+
+
+https://github.com/user-attachments/assets/52d6538f-177b-4894-9502-550dd5198877
+
+
 
 ## Dynamic Splats + Instances on iPad Pro (M1)
 
