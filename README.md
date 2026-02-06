@@ -46,21 +46,23 @@ python export_clusters_bin.py <clusters.pt> <path to clusters output.bin>
 
 # Demo
 
-## Dynamic Splats on iPhone 15
-
-https://github.com/user-attachments/assets/fee3bc1f-168a-4adb-b358-5274d74e6000
 
 ## Dynamic Splats + Instances on iPhone 17 Air 
 
-
-
 https://github.com/user-attachments/assets/52d6538f-177b-4894-9502-550dd5198877
-
-
 
 ## Dynamic Splats + Instances on iPad Pro (M1)
 
-https://github.com/user-attachments/assets/471eff37-f077-427d-9929-4be8fbb6a465
+
+
+https://github.com/user-attachments/assets/44abfca5-c44f-4ee9-9f72-59fef1110d2b
+
+
+
+## Dynamic Splats on iPhone 15 
+
+https://github.com/user-attachments/assets/fee3bc1f-168a-4adb-b358-5274d74e6000
+
 
 
 # Acknowledgments
