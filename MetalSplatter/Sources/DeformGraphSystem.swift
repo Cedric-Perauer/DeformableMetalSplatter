@@ -8,6 +8,7 @@ public class DeformGraphSystem {
     let mpsDevice: MPSGraphDevice
     let graph: MPSGraph
     var executable: MPSGraphExecutable?
+    public let useFP16: Bool
     
     // Tensors
     var inputXYZTensor: MPSGraphTensor?
@@ -16,7 +17,7 @@ public class DeformGraphSystem {
     var outRotTensor: MPSGraphTensor?
     var outScaleTensor: MPSGraphTensor?
     
-    var weightDataMap: [String: (Data, [NSNumber])] = [:]
+    var weightDataMap: [String: (Data, [NSNumber], MPSDataType)] = [:]
     
     // Deformation Network Params
     let W = 256
@@ -25,14 +26,37 @@ public class DeformGraphSystem {
     let MULTIRES = 10
     let T_MULTIRES = 10
     
-    // When passing all points, the GPU crashed..., regularizing it with a batch size
-//    let SAFE_BATCH_SIZE = 16384 * 8
+    // Larger batch size = fewer kernel launches = less overhead
+    // 131072 should work on most devices; reduce if GPU crashes
     let SAFE_BATCH_SIZE = 16384
     var flatten = true
-    public init(device: MTLDevice) {
+    public init(device: MTLDevice, useFP16: Bool) {
         self.device = device
         self.mpsDevice = MPSGraphDevice(mtlDevice: device)
         self.graph = MPSGraph()
+        #if arch(x86_64)
+        self.useFP16 = false
+        #else
+        self.useFP16 = useFP16
+        #endif
+    }
+    
+    private static func float32DataToFloat16Data(_ data: Data) -> Data {
+#if arch(x86_64)
+        // Float16 isn't available on x86_64 (we alias it to Float elsewhere for buildability),
+        // and FP16 deformation is disabled on that architecture anyway.
+        return Data()
+#else
+        let floatCount = data.count / MemoryLayout<Float>.size
+        return data.withUnsafeBytes { raw in
+            let floats = raw.bindMemory(to: Float.self)
+            var halfBits = [UInt16](repeating: 0, count: floatCount)
+            for i in 0..<floatCount {
+                halfBits[i] = Float16(floats[i]).bitPattern
+            }
+            return Data(bytes: halfBits, count: halfBits.count * MemoryLayout<UInt16>.size)
+        }
+#endif
     }
     
     public func loadWeights(flatData: Data) {
@@ -44,13 +68,23 @@ public class DeformGraphSystem {
             let byteCount = outDim * inDim * floatSize
             guard (offset + byteCount) <= flatData.count else { return }
             
-            let subData = flatData.subdata(in: offset..<(offset + byteCount))
-            weightDataMap["\(name)_w"] = (subData, [NSNumber(value: outDim), NSNumber(value: inDim)])
+            let subDataF32 = flatData.subdata(in: offset..<(offset + byteCount))
+            if useFP16 {
+                let subDataF16 = Self.float32DataToFloat16Data(subDataF32)
+                weightDataMap["\(name)_w"] = (subDataF16, [NSNumber(value: outDim), NSNumber(value: inDim)], .float16)
+            } else {
+                weightDataMap["\(name)_w"] = (subDataF32, [NSNumber(value: outDim), NSNumber(value: inDim)], .float32)
+            }
             offset += byteCount
             
             let biasBytes = outDim * floatSize
-            let biasData = flatData.subdata(in: offset..<(offset + biasBytes))
-            weightDataMap["\(name)_b"] = (biasData, [NSNumber(value: 1), NSNumber(value: outDim)])
+            let biasDataF32 = flatData.subdata(in: offset..<(offset + biasBytes))
+            if useFP16 {
+                let biasDataF16 = Self.float32DataToFloat16Data(biasDataF32)
+                weightDataMap["\(name)_b"] = (biasDataF16, [NSNumber(value: 1), NSNumber(value: outDim)], .float16)
+            } else {
+                weightDataMap["\(name)_b"] = (biasDataF32, [NSNumber(value: 1), NSNumber(value: outDim)], .float32)
+            }
             offset += biasBytes
         }
         
@@ -84,9 +118,19 @@ public class DeformGraphSystem {
             xyz = inputXYZ
             t   = inputT
         }
+        
+        let xyzTyped: MPSGraphTensor
+        let tTyped: MPSGraphTensor
+        if useFP16 {
+            xyzTyped = graph.cast(xyz, to: .float16, name: "cast_xyz_f16")
+            tTyped = graph.cast(t, to: .float16, name: "cast_t_f16")
+        } else {
+            xyzTyped = xyz
+            tTyped = t
+        }
 
-        let embXYZ = positionalEncoding(input: xyz, numFreqs: MULTIRES)
-        let embT   = positionalEncoding(input: t, numFreqs: T_MULTIRES)
+        let embXYZ = positionalEncoding(input: xyzTyped, numFreqs: MULTIRES, dataType: useFP16 ? .float16 : .float32)
+        let embT   = positionalEncoding(input: tTyped, numFreqs: T_MULTIRES, dataType: useFP16 ? .float16 : .float32)
         let inputs = graph.concatTensors([embXYZ, embT], dimension: 1, name: "input_concat")
         
         var h = inputs
@@ -98,9 +142,14 @@ public class DeformGraphSystem {
         }
         
         // Output Layers
-        let outXYZ = denseLayer(input: h, name: "Head_XYZ", activation: false)
-        let outRot = denseLayer(input: h, name: "Head_Rot", activation: false)
-        let outScale = denseLayer(input: h, name: "Head_Scale", activation: false)
+        let outXYZRaw = denseLayer(input: h, name: "Head_XYZ", activation: false)
+        let outRotRaw = denseLayer(input: h, name: "Head_Rot", activation: false)
+        let outScaleRaw = denseLayer(input: h, name: "Head_Scale", activation: false)
+        
+        // We always write float32 into the output MTLBuffers.
+        let outXYZ = useFP16 ? graph.cast(outXYZRaw, to: .float32, name: "out_xyz_f32") : outXYZRaw
+        let outRot = useFP16 ? graph.cast(outRotRaw, to: .float32, name: "out_rot_f32") : outRotRaw
+        let outScale = useFP16 ? graph.cast(outScaleRaw, to: .float32, name: "out_scale_f32") : outScaleRaw
         
         let feedsDict: [MPSGraphTensor : MPSGraphShapedType]
         if (self.flatten) {
@@ -148,9 +197,13 @@ public class DeformGraphSystem {
                     count: Int) {
         
         guard let exec = executable else { return }
+        let totalStart = CFAbsoluteTimeGetCurrent()
         let floatSize = MemoryLayout<Float>.size
+        let numBatches = (count + SAFE_BATCH_SIZE - 1) / SAFE_BATCH_SIZE
+
         for i in stride(from: 0, to: count, by: SAFE_BATCH_SIZE) {
             autoreleasepool {
+                let batchStart = CFAbsoluteTimeGetCurrent()
                 let currentCount = min(SAFE_BATCH_SIZE, count - i)
                 
                 // Define the offset
@@ -214,20 +267,24 @@ public class DeformGraphSystem {
                                      results: resultsArray,
                                      executionDescriptor: nil)
                 }
+                
+                let batchElapsedMs = (CFAbsoluteTimeGetCurrent() - batchStart) * 1000.0
+                if numBatches > 1 {
+                    print("DeformGraph batch \(i / SAFE_BATCH_SIZE): \(batchElapsedMs) ms")
+                }
             }
         }
-        if let fenceBuffer = commandQueue.makeCommandBuffer() {
-            fenceBuffer.label = "Deformation Fence"
-            fenceBuffer.commit()
-            fenceBuffer.waitUntilCompleted()
-        }
+
+        let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
+        print("DeformGraph total (\(numBatches) batches): \(totalElapsedMs) ms")
     }
     
-    func positionalEncoding(input: MPSGraphTensor, numFreqs: Int) -> MPSGraphTensor {
+    func positionalEncoding(input: MPSGraphTensor, numFreqs: Int, dataType: MPSDataType) -> MPSGraphTensor {
         var tensors = [input]
         for i in 0..<numFreqs {
             let freq = Float(pow(2.0, Double(i)))
-            let scaled = graph.multiplication(input, graph.constant(Double(freq), dataType: .float32), name: nil)
+            let freqConst = graph.constant(Double(freq), dataType: dataType)
+            let scaled = graph.multiplication(input, freqConst, name: nil)
             tensors.append(graph.sin(with: scaled, name: nil))
             tensors.append(graph.cos(with: scaled, name: nil))
         }
@@ -235,13 +292,13 @@ public class DeformGraphSystem {
     }
     
     func denseLayer(input: MPSGraphTensor, name: String, activation: Bool) -> MPSGraphTensor {
-        guard let (wD, wS) = weightDataMap["\(name)_w"],
-              let (bD, bS) = weightDataMap["\(name)_b"] else {
+        guard let (wD, wS, wType) = weightDataMap["\(name)_w"],
+              let (bD, bS, bType) = weightDataMap["\(name)_b"] else {
             print("CRITICAL ERROR: Missing weights for layer '\(name)'. Loaded keys: \(weightDataMap.keys)")
             fatalError("Missing weights for \(name)")
         }
-        let w = graph.constant(wD, shape: wS, dataType: .float32)
-        let b = graph.constant(bD, shape: bS, dataType: .float32)
+        let w = graph.constant(wD, shape: wS, dataType: wType)
+        let b = graph.constant(bD, shape: bS, dataType: bType)
         let wT = graph.transposeTensor(w, dimension: 0, withDimension: 1, name: nil)
         var out = graph.matrixMultiplication(primary: input, secondary: wT, name: nil)
         out = graph.addition(out, b, name: nil)

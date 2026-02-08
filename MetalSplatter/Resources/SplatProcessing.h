@@ -11,6 +11,9 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2);
 
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
-                       uint relativeVertexIndex);
+                       uint relativeVertexIndex,
+                       uint splatIndex,
+                       constant packed_float3 *clusterColors,
+                       constant uint *clusterIDs);
 
 half splatFragmentAlpha(half2 relativePosition, half splatAlpha);

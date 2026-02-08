@@ -30,9 +30,7 @@ public class SplatRenderer {
         static let tileSize = MTLSize(width: 32, height: 32, depth: 1)
     }
 
-    private static let log =
-        Logger(subsystem: Bundle.module.bundleIdentifier!,
-               category: "SplatRenderer")
+    private static let log = Logger(subsystem: Bundle.module.bundleIdentifier!,category: "SplatRenderer")
     
     private var computeDepthsPipelineState: MTLComputePipelineState?
     
@@ -55,16 +53,27 @@ public class SplatRenderer {
         case uniforms = 0
         case splat    = 1
         case splatIndices = 2
+        case clusterColor = 3
+        case clusterID = 4
     }
 
-    // Keep in sync with Shaders.metal : Uniforms
+    // Keep in sync with Shaders.metal : Uniforms (176 bytes total)
     struct Uniforms {
-        var projectionMatrix: matrix_float4x4
-        var viewMatrix: matrix_float4x4
-        var screenSize: SIMD2<UInt32> // Size of screen in pixels
+        var projectionMatrix: matrix_float4x4  // 64 bytes (offset 0)
+        var viewMatrix: matrix_float4x4        // 64 bytes (offset 64)
+        var screenSize: SIMD2<UInt32>          // 8 bytes  (offset 128)
 
-        var splatCount: UInt32
-        var indexedSplatCount: UInt32
+        var splatCount: UInt32                 // 4 bytes  (offset 136)
+        var indexedSplatCount: UInt32          // 4 bytes  (offset 140)
+        var showClusterColors: UInt32          // 4 bytes  (offset 144)
+        var selectedClusterID: Int32           // 4 bytes  (offset 148) -1 means show all clusters
+        
+        var showDepthVisualization: UInt32     // 4 bytes  (offset 152)
+        var _pad1: UInt32 = 0                  // 4 bytes  (offset 156) for float2 alignment
+        var depthRange: SIMD2<Float>           // 8 bytes  (offset 160) min/max depth
+        
+        // Padding to match Metal's 16-byte struct alignment (total 176 bytes)
+        var _padding: SIMD2<UInt32> = .zero    // 8 bytes  (offset 168)
     }
 
     // Keep in sync with Shaders.metal : UniformsArray
@@ -122,11 +131,24 @@ public class SplatRenderer {
     }
     
     // Deformation Support
+    /// If true, the deformation MPSGraph uses FP16 weights/compute (casts I/O to/from FP32).
+    /// This is a major speed win on Apple GPUs, but can introduce small numeric differences.
+    public var useFP16Deformation: Bool = true
+    public var useClusterColors: Bool = false
+    public var selectedClusterID: Int32 = -1  // -1 means show all clusters
+    
+    /// Returns true if cluster data (clusters.bin) was successfully loaded
+    public var hasClusters: Bool {
+        clusterColorBuffer != nil && clusterIdBuffer != nil
+    }
+    public var useDepthVisualization: Bool = false
+    private var currentDepthRange: SIMD2<Float> = SIMD2(0.1, 10.0)  // Default near/far
     var canonicalBuffer: MetalBuffer<CanonicalSplat>?
     var canonicalSplatBufferPrime: MetalBuffer<CanonicalSplat>?
     var sortedIndexBuffer: MetalBuffer<UInt32>?
     var deformSystem: DeformGraphSystem?
     var extractPipeline: MTLComputePipelineState?
+    var timeFillPipeline: MTLComputePipelineState?
     var applyPipeline: MTLComputePipelineState?
     
     // Intermediate Buffers
@@ -135,7 +157,14 @@ public class SplatRenderer {
     var bufDXYZ: MTLBuffer?
     var bufDRot: MTLBuffer?
     var bufDScale: MTLBuffer?
+    var clusterIdBuffer: MTLBuffer?
+    var clusterColorBuffer: MTLBuffer?
+    private let emptyClusterColorBuffer: MTLBuffer
+    private let emptyClusterIdBuffer: MTLBuffer
     private var lastDeformationTime: Float = -1.0
+    
+    // Picking support (screen-space based)
+    private var maxClusterID: UInt32 = 0
     
     public let device: MTLDevice
     public let colorFormat: MTLPixelFormat
@@ -174,6 +203,10 @@ public class SplatRenderer {
 
     public var onSortStart: (() -> Void)?
     public var onSortComplete: ((TimeInterval) -> Void)?
+    
+    public private(set) var currentFPS: Double = 0
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
 
     private let library: MTLLibrary
     // Single-stage pipeline
@@ -243,6 +276,10 @@ public class SplatRenderer {
         self.sortedIndexBuffer = try MetalBuffer(device: device)
 //        self.canonicalSplatBufferPrime = try MetalBuffer(device: device)
         self.indexBuffer = try MetalBuffer(device: device)
+        self.emptyClusterColorBuffer = device.makeBuffer(length: MemoryLayout<Float>.size * 3,
+                                                         options: .storageModeShared)!
+        self.emptyClusterIdBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.size,
+                                                      options: .storageModeShared)!
 
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
@@ -324,6 +361,132 @@ public class SplatRenderer {
         depthStateDescriptor.depthCompareFunction = MTLCompareFunction.always
         depthStateDescriptor.isDepthWriteEnabled = writeDepth
         return device.makeDepthStencilState(descriptor: depthStateDescriptor)!
+    }
+    
+    // MARK: - Picking Pipeline (screen-space based, finds splat closest to click point)
+    
+    // Keep in sync with SingleStageRenderPath.metal : PickingParams
+    struct PickingParams {
+        var clickPointX: Float          // 4 bytes
+        var clickPointY: Float          // 4 bytes
+        var screenWidth: Float          // 4 bytes
+        var screenHeight: Float         // 4 bytes - total 16 bytes
+    }
+    
+    private var pickingComputePipeline: MTLComputePipelineState?
+    private var minScoreBuffer: MTLBuffer?
+    private var resultClusterBuffer: MTLBuffer?
+    
+    private func buildPickingComputePipelineIfNeeded() throws {
+        guard pickingComputePipeline == nil else { return }
+        
+        guard let findNearestFunc = library.makeFunction(name: "findNearestSplatToScreen") else {
+            throw NSError(domain: "SplatRenderer", code: 1,
+                         userInfo: [NSLocalizedDescriptionKey: "Could not find findNearestSplatToScreen kernel"])
+        }
+        pickingComputePipeline = try device.makeComputePipelineState(function: findNearestFunc)
+        
+        // Buffers for atomic operations
+        minScoreBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.size, options: .storageModeShared)
+        resultClusterBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.size, options: .storageModeShared)
+    }
+    
+    
+    /// Pick the cluster ID at a screen position.
+    /// Projects all splats to screen space and finds the one closest to the click point.
+    /// Uses depth to prefer closer splats when multiple project to similar screen positions.
+    /// Returns -1 if no cluster at that position.
+    public func pickCluster(at screenPoint: CGPoint,
+                            viewportSize: CGSize,
+                            viewport: ViewportDescriptor) -> Int32 {
+        do {
+            try buildPickingComputePipelineIfNeeded()
+        } catch {
+            print("Failed to build picking pipeline: \(error)")
+            return -1
+        }
+        
+        guard let computePipeline = pickingComputePipeline,
+              let clusterIDs = clusterIdBuffer,
+              let scoreBuffer = minScoreBuffer,
+              let resultBuffer = resultClusterBuffer,
+              splatBuffer.count > 0,
+              maxClusterID > 0 else {
+            return -1
+        }
+        
+        guard let commandQueue = device.makeCommandQueue(),
+              let commandBuffer = commandQueue.makeCommandBuffer() else {
+            return -1
+        }
+        
+        // Initialize buffers
+        let scorePtr = scoreBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        scorePtr[0] = UInt32.max
+        
+        let resultPtr = resultBuffer.contents().assumingMemoryBound(to: UInt32.self)
+        resultPtr[0] = UInt32.max
+        
+        // Create uniforms - must match Metal struct layout exactly (176 bytes)
+        var uniforms = Uniforms(
+            projectionMatrix: viewport.projectionMatrix,
+            viewMatrix: viewport.viewMatrix,
+            screenSize: SIMD2(UInt32(viewportSize.width), UInt32(viewportSize.height)),
+            splatCount: UInt32(splatBuffer.count),
+            indexedSplatCount: UInt32(min(splatBuffer.count, Constants.maxIndexedSplatCount)),
+            showClusterColors: 0,
+            selectedClusterID: -1,
+            showDepthVisualization: 0,
+            _pad1: 0,
+            depthRange: SIMD2(0.1, 10.0)
+        )
+        
+        var params = PickingParams(
+            clickPointX: Float(screenPoint.x),
+            clickPointY: Float(screenPoint.y),
+            screenWidth: Float(viewportSize.width),
+            screenHeight: Float(viewportSize.height)
+        )
+        
+        print("Picking at screen \(screenPoint), viewport size \(viewportSize), splat count \(splatBuffer.count)")
+        
+        let splatCount = splatBuffer.count
+        
+        guard let encoder = commandBuffer.makeComputeCommandEncoder() else {
+            return -1
+        }
+        
+        encoder.setComputePipelineState(computePipeline)
+        encoder.setBuffer(splatBuffer.buffer, offset: 0, index: 0)
+        encoder.setBuffer(clusterIDs, offset: 0, index: 1)
+        encoder.setBytes(&uniforms, length: MemoryLayout<Uniforms>.size, index: 2)
+        encoder.setBytes(&params, length: MemoryLayout<PickingParams>.size, index: 3)
+        encoder.setBuffer(scoreBuffer, offset: 0, index: 4)
+        encoder.setBuffer(resultBuffer, offset: 0, index: 5)
+        
+        let threadsPerGroup = computePipeline.maxTotalThreadsPerThreadgroup
+        let threadgroups = (splatCount + threadsPerGroup - 1) / threadsPerGroup
+        
+        encoder.dispatchThreadgroups(MTLSize(width: threadgroups, height: 1, depth: 1),
+                                     threadsPerThreadgroup: MTLSize(width: threadsPerGroup, height: 1, depth: 1))
+        encoder.endEncoding()
+        
+        commandBuffer.commit()
+        commandBuffer.waitUntilCompleted()
+        
+        let minScore = Float(scorePtr[0]) / 100.0
+        let rawClusterID = resultPtr[0]
+        
+        // Check for "no result" before casting (UInt32.max would overflow Int32)
+        if rawClusterID == UInt32.max || scorePtr[0] == UInt32.max {
+            print("No splat found within 100 pixels of click point")
+            return -1
+        }
+        
+        let clusterID = Int32(rawClusterID)
+        print("Found splat with cluster \(clusterID), score = \(minScore)")
+        
+        return clusterID
     }
 
     private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
@@ -425,12 +588,22 @@ public class SplatRenderer {
     private func updateUniforms(forViewports viewports: [ViewportDescriptor],
                                 splatCount: UInt32,
                                 indexedSplatCount: UInt32) {
+        // Update depth range based on camera position (simple heuristic)
+        if useDepthVisualization {
+            updateDepthRange(forViewports: viewports)
+        }
+        
         for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
                                     viewMatrix: viewport.viewMatrix,
                                     screenSize: SIMD2(x: UInt32(viewport.screenSize.x), y: UInt32(viewport.screenSize.y)),
                                     splatCount: splatCount,
-                                    indexedSplatCount: indexedSplatCount)
+                                    indexedSplatCount: indexedSplatCount,
+                                    showClusterColors: useClusterColors ? 1 : 0,
+                                    selectedClusterID: selectedClusterID,
+                                    showDepthVisualization: useDepthVisualization ? 1 : 0,
+                                    _pad1: 0,
+                                    depthRange: currentDepthRange)
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
 
@@ -439,6 +612,39 @@ public class SplatRenderer {
 
         if !sorting {
             resort()
+        }
+    }
+    
+    /// Update depth range by sampling visible splats
+    private func updateDepthRange(forViewports viewports: [ViewportDescriptor]) {
+        guard let viewport = viewports.first, splatBuffer.count > 0 else { return }
+        
+        let viewMatrix = viewport.viewMatrix
+        var minDepth: Float = Float.greatestFiniteMagnitude
+        var maxDepth: Float = -Float.greatestFiniteMagnitude
+        
+        // Sample a subset of splats for performance (every Nth splat)
+        let sampleStride = max(1, splatBuffer.count / 1000)
+        let splatPtr = splatBuffer.buffer.contents().assumingMemoryBound(to: Splat.self)
+        
+        for i in stride(from: 0, to: splatBuffer.count, by: sampleStride) {
+            let splat = splatPtr[i]
+            let pos = SIMD4<Float>(splat.position.x, splat.position.y, splat.position.z, 1.0)
+            let viewPos = viewMatrix * pos
+            let depth = -viewPos.z  // Positive depth (camera looks down -Z)
+            
+            if depth > 0.01 {  // Only consider splats in front of camera
+                minDepth = min(minDepth, depth)
+                maxDepth = max(maxDepth, depth)
+            }
+        }
+        
+        // Add some padding and ensure valid range
+        if minDepth < maxDepth && minDepth > 0 {
+            let range = maxDepth - minDepth
+            currentDepthRange = SIMD2(minDepth - range * 0.05, maxDepth + range * 0.05)
+        } else {
+            currentDepthRange = SIMD2(0.1, 10.0)  // Fallback
         }
     }
     
@@ -469,7 +675,7 @@ public class SplatRenderer {
         let weightsData = try Data(contentsOf: weightsURL)
         
         // Initialize the MPS deformation network
-        self.deformSystem = DeformGraphSystem(device: device)
+        self.deformSystem = DeformGraphSystem(device: device, useFP16: useFP16Deformation)
         self.deformSystem?.loadWeights(flatData: weightsData)
         self.deformSystem?.buildAndCompile()
         
@@ -477,12 +683,14 @@ public class SplatRenderer {
         let lib = self.library
         
         guard let extractFunc = lib.makeFunction(name: "extract_graph_inputs"),
+              let timeFillFunc = lib.makeFunction(name: "fill_time"),
               let applyFunc = lib.makeFunction(name: "apply_graph_outputs") else {
             print("Error: Could not find Deform.metal shader functions.")
             return
         }
 
         self.extractPipeline = try await device.makeComputePipelineState(function: extractFunc)
+        self.timeFillPipeline = try await device.makeComputePipelineState(function: timeFillFunc)
         self.applyPipeline = try await device.makeComputePipelineState(function: applyFunc)
         
         // Read canonical Gaussians using the original IO pipeline
@@ -501,59 +709,214 @@ public class SplatRenderer {
             bufDScale = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
         }
         
-//        guard let queue = device.makeCommandQueue(),
-//              let sys = deformSystem,
-//              let extractPipe = extractPipeline,
-//              let applyPipe = applyPipeline,
-//              let cBuffer = canonicalBuffer?.buffer,
-//              let bXYZ = bufXYZ, let bT = bufT,
-//              let bDXYZ = bufDXYZ, let bDRot = bufDRot, let bDScale = bufDScale else { return }
-//
-//        // Extract xyz from canonical Gaussians and send t=0.0
-//        if let cmdA = queue.makeCommandBuffer(),
-//           let enc = cmdA.makeComputeCommandEncoder() {
-//            enc.label = "Init: Extract"
-//            enc.setComputePipelineState(extractPipe)
-//            enc.setBuffer(cBuffer, offset: 0, index: 0)
-//            enc.setBuffer(bXYZ, offset: 0, index: 1)
-//            enc.setBuffer(bT, offset: 0, index: 2)
-//            var t = 0.0
-//            enc.setBytes(&t, length: 4, index: 3)
-//            let w = extractPipe.threadExecutionWidth
-//            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
-//                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
-//            enc.endEncoding()
-//            cmdA.commit()
-//            cmdA.waitUntilCompleted()
-//        }
-//        
-//        // Calculate d_xyz, d_rotation, d_scaling
-//        sys.run(commandQueue: queue,
-//                xyzBuffer: bXYZ,
-//                tBuffer: bT,
-//                outXYZ: bDXYZ,
-//                outRot: bDRot,
-//                outScale: bDScale,
-//                count: count)
-//        
-//        // Apply deformation to canonical Gaussians
-//        if let cmdC = queue.makeCommandBuffer(),
-//           let enc = cmdC.makeComputeCommandEncoder() {
-//            enc.label = "Init: Apply"
-//            enc.setComputePipelineState(applyPipe)
-//            enc.setBuffer(cBuffer, offset: 0, index: 0)
-//            enc.setBuffer(bDXYZ, offset: 0, index: 1)
-//            enc.setBuffer(bDRot, offset: 0, index: 2)
-//            enc.setBuffer(bDScale, offset: 0, index: 3)
-//            enc.setBuffer(splatBuffer.buffer, offset: 0, index: 4)
-//            let w = applyPipe.threadExecutionWidth
-//            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
-//                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
-//            enc.endEncoding()
-//            cmdC.commit()
-//            cmdC.waitUntilCompleted()
-//        }
+        if count > 0,
+           let extractPipe = extractPipeline,
+           let cBuffer = canonicalBuffer?.buffer,
+           let bXYZ = bufXYZ,
+           let bT = bufT,
+           let queue = device.makeCommandQueue(),
+           let cmd = queue.makeCommandBuffer(),
+           let enc = cmd.makeComputeCommandEncoder() {
+            enc.label = "Init: Extract XYZ"
+            enc.setComputePipelineState(extractPipe)
+            enc.setBuffer(cBuffer, offset: 0, index: 0)
+            enc.setBuffer(bXYZ, offset: 0, index: 1)
+            enc.setBuffer(bT, offset: 0, index: 2)
+            var t: Float = 0
+            enc.setBytes(&t, length: 4, index: 3)
+            
+            let w = extractPipe.threadExecutionWidth
+            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+            enc.endEncoding()
+            
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+        
+
         print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
+    }
+
+
+    public func loadDeformableSceneClusters(directory: URL) async throws {
+        // When selecting a whole directory as input,
+        // automatically consider as loading a dynamic scene.
+        
+        // Configure scene and deform mlp path
+        let plyURL = directory.appendingPathComponent("point_cloud.ply")
+        let weightsURL = directory.appendingPathComponent("weights.bin")
+        let clustersURL = directory.appendingPathComponent("clusters.bin")
+        
+        // Load the mlp weight
+        let weightsData = try Data(contentsOf: weightsURL)
+        
+        // Initialize the MPS deformation network
+        self.deformSystem = DeformGraphSystem(device: device, useFP16: useFP16Deformation)
+        self.deformSystem?.loadWeights(flatData: weightsData)
+        self.deformSystem?.buildAndCompile()
+        
+        // Init Kernels
+        let lib = self.library
+        
+        guard let extractFunc = lib.makeFunction(name: "extract_graph_inputs"),
+              let timeFillFunc = lib.makeFunction(name: "fill_time"),
+              let applyFunc = lib.makeFunction(name: "apply_graph_outputs") else {
+            print("Error: Could not find Deform.metal shader functions.")
+            return
+        }
+
+        self.extractPipeline = try await device.makeComputePipelineState(function: extractFunc)
+        self.timeFillPipeline = try await device.makeComputePipelineState(function: timeFillFunc)
+        self.applyPipeline = try await device.makeComputePipelineState(function: applyFunc)
+        
+        // Read canonical Gaussians using the original IO pipeline
+        try await readCanonical(from: plyURL)
+        try await read(from: plyURL)
+        
+        guard canonicalBuffer!.count == splatBuffer.count else {return}
+        // Allocate Buffers
+        let count = canonicalBuffer?.count ?? 0
+        
+        if count > 0 {
+            bufXYZ = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
+            bufT   = device.makeBuffer(length: count * 1 * 4, options: .storageModePrivate)
+            bufDXYZ = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
+            bufDRot = device.makeBuffer(length: count * 4 * 4, options: .storageModePrivate)
+            bufDScale = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
+        }
+        
+        if count > 0,
+           let extractPipe = extractPipeline,
+           let cBuffer = canonicalBuffer?.buffer,
+           let bXYZ = bufXYZ,
+           let bT = bufT,
+           let queue = device.makeCommandQueue(),
+           let cmd = queue.makeCommandBuffer(),
+           let enc = cmd.makeComputeCommandEncoder() {
+            enc.label = "Init: Extract XYZ"
+            enc.setComputePipelineState(extractPipe)
+            enc.setBuffer(cBuffer, offset: 0, index: 0)
+            enc.setBuffer(bXYZ, offset: 0, index: 1)
+            enc.setBuffer(bT, offset: 0, index: 2)
+            var t: Float = 0
+            enc.setBytes(&t, length: 4, index: 3)
+            
+            let w = extractPipe.threadExecutionWidth
+            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
+                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
+            enc.endEncoding()
+            
+            cmd.commit()
+            cmd.waitUntilCompleted()
+        }
+        
+        print("About to load clusters from: \(clustersURL)")
+        loadClustersBin(from: clustersURL, expectedCount: count)
+        
+        print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
+    }
+
+    private func loadClustersBin(from url: URL, expectedCount: Int) {
+        print("loadClustersBin called with url: \(url), expectedCount: \(expectedCount)")
+        
+        let data: Data
+        do {
+            data = try Data(contentsOf: url)
+            print("Read \(data.count) bytes from clusters.bin")
+        } catch {
+            print("Failed to read clusters.bin: \(error.localizedDescription)")
+            return
+        }
+        
+        guard data.count >= 12 else {
+            print("clusters.bin too small: \(data.count) bytes")
+            return
+        }
+        
+        let magic = String(decoding: data.subdata(in: 0..<4), as: UTF8.self)
+        guard magic == "CLST" else {
+            print("clusters.bin has bad magic '\(magic)'")
+            return
+        }
+        print("Magic OK, reading header...")
+        
+        func readU32(_ offset: Int) -> UInt32 {
+            data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { raw in
+                let value = raw.load(as: UInt32.self)
+                return UInt32(littleEndian: value)
+            }
+        }
+        
+        let version = readU32(4)
+        guard version == 1 else {
+            Self.log.error("clusters.bin unsupported version \(version).")
+            return
+        }
+        
+        let count = Int(readU32(8))
+        guard count == expectedCount else {
+            Self.log.error("clusters.bin count \(count) != splat count \(expectedCount).")
+            return
+        }
+        
+        let idsOffset = 12
+        let idsBytes = count * MemoryLayout<UInt32>.size
+        let colorsOffset = idsOffset + idsBytes
+        let colorsBytes = count * 3 * MemoryLayout<Float>.size
+        guard data.count >= colorsOffset + colorsBytes else {
+            Self.log.error("clusters.bin truncated.")
+            return
+        }
+        
+        var ids = [UInt32](repeating: 0, count: count)
+        data.withUnsafeBytes { raw in
+            let base = raw.baseAddress!.advanced(by: idsOffset)
+            let src = base.assumingMemoryBound(to: UInt32.self)
+            for i in 0..<count {
+                ids[i] = UInt32(littleEndian: src[i])
+            }
+        }
+        
+        let colorCount = count * 3
+        var colors = [Float](repeating: 0, count: colorCount)
+        data.withUnsafeBytes { raw in
+            let base = raw.baseAddress!.advanced(by: colorsOffset)
+            let src = base.assumingMemoryBound(to: Float.self)
+            for i in 0..<colorCount {
+                colors[i] = src[i]
+            }
+        }
+        
+        clusterIdBuffer = device.makeBuffer(bytes: ids,
+                                            length: ids.count * MemoryLayout<UInt32>.size,
+                                            options: .storageModeShared)
+        clusterColorBuffer = device.makeBuffer(bytes: colors,
+                                               length: colors.count * MemoryLayout<Float>.size,
+                                               options: .storageModeShared)
+        
+        // Calculate max cluster ID for picking
+        maxClusterID = ids.max() ?? 0
+        print("Max cluster ID: \(maxClusterID)")
+        
+        // Debug: print first few colors to compare with Python
+        print("=== clusters.bin debug ===")
+        print("Count: \(count)")
+        for i in 0..<min(3, count) {
+            let r = colors[i * 3 + 0]
+            let g = colors[i * 3 + 1]
+            let b = colors[i * 3 + 2]
+            print("Color[\(i)]: (\(r), \(g), \(b))")
+        }
+        for i in max(0, count - 3)..<count {
+            let r = colors[i * 3 + 0]
+            let g = colors[i * 3 + 1]
+            let b = colors[i * 3 + 2]
+            print("Color[\(i)]: (\(r), \(g), \(b))")
+        }
+        print("=== end clusters.bin debug ===")
+        
+        Self.log.info("Loaded clusters.bin (\(count) entries).")
     }
     
     public func update(time: Float, commandBuffer: MTLCommandBuffer) {
@@ -568,7 +931,7 @@ public class SplatRenderer {
         
         guard count > 0,
               let sys = deformSystem,
-              let extractPipe = extractPipeline,
+              let timeFillPipe = timeFillPipeline,
               let applyPipe = applyPipeline,
               let bXYZ = bufXYZ,
               let bT = bufT,
@@ -580,28 +943,28 @@ public class SplatRenderer {
             Self.log.debug("Something is missing.")
             return
         }
-        // Extract xyz from canonical Gaussians and send t
-        if let extractCmd = commandQueue.makeCommandBuffer(),
-           let enc = extractCmd.makeComputeCommandEncoder() {
-            
-            enc.label = "Update: Extract Inputs"
-            enc.setComputePipelineState(extractPipe)
-            enc.setBuffer(cBuffer, offset: 0, index: 0)
-            enc.setBuffer(bXYZ, offset: 0, index: 1)
-            enc.setBuffer(bT, offset: 0, index: 2)
+        // Fill t buffer (xyz is static and extracted once during load)
+        if let timeCmd = commandQueue.makeCommandBuffer(),
+           let enc = timeCmd.makeComputeCommandEncoder() {
+            enc.label = "Update: Fill Time"
+            enc.setComputePipelineState(timeFillPipe)
+            enc.setBuffer(bT, offset: 0, index: 0)
             var t = time
-            enc.setBytes(&t, length: 4, index: 3)
+            enc.setBytes(&t, length: 4, index: 1)
             
-            let w = extractPipe.threadExecutionWidth
+            let w = timeFillPipe.threadExecutionWidth
             enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
             enc.endEncoding()
-            
-            extractCmd.commit()
-            extractCmd.waitUntilCompleted() // CPU Wait: Ensures data is ready for Graph
+            let start = CFAbsoluteTimeGetCurrent()
+            timeCmd.commit()
+            timeCmd.waitUntilCompleted()
+            let elapsedMs = (CFAbsoluteTimeGetCurrent() - start) * 1000.0
+            Self.log.debug("Deform fill_time: \(elapsedMs) ms")
         }
         
         // Calculate d_xyz, d_rotation, d_scaling
+        let graphStart = CFAbsoluteTimeGetCurrent()
         sys.run(commandQueue: commandQueue,
                 xyzBuffer: bXYZ,
                 tBuffer: bT,
@@ -609,6 +972,8 @@ public class SplatRenderer {
                 outRot: bDRot,
                 outScale: bDScale,
                 count: count)
+        let graphElapsedMs = (CFAbsoluteTimeGetCurrent() - graphStart) * 1000.0
+        Self.log.debug("Deform graph: \(graphElapsedMs) ms")
         
         // Apply deformation to canonical Gaussians
         if let enc = commandBuffer.makeComputeCommandEncoder() {
@@ -621,9 +986,12 @@ public class SplatRenderer {
             enc.setBuffer(splatBuffer.buffer, offset: 0, index: 4)
             
             let w = applyPipe.threadExecutionWidth
+            let applyStart = CFAbsoluteTimeGetCurrent()
             enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
             enc.endEncoding()
+            let applyElapsedMs = (CFAbsoluteTimeGetCurrent() - applyStart) * 1000.0
+            Self.log.debug("Deform apply encode: \(applyElapsedMs) ms")
         }
     }
 
@@ -760,9 +1128,13 @@ public class SplatRenderer {
 
         renderEncoder.setVertexBuffer(dynamicUniformBuffers, offset: uniformBufferOffset, index: BufferIndex.uniforms.rawValue)
         renderEncoder.setVertexBuffer(splatBuffer.buffer, offset: 0, index: BufferIndex.splat.rawValue)
+        let clusterBuffer = clusterColorBuffer ?? emptyClusterColorBuffer
+        renderEncoder.setVertexBuffer(clusterBuffer, offset: 0, index: BufferIndex.clusterColor.rawValue)
+        let clusterIDBuffer = clusterIdBuffer ?? emptyClusterIdBuffer
+        renderEncoder.setVertexBuffer(clusterIDBuffer, offset: 0, index: BufferIndex.clusterID.rawValue)
         
         if let sortedBuffer = sortedIndexBuffer?.buffer {
-            renderEncoder.setVertexBuffer(sortedBuffer, offset: 0, index: 2) // Index 2 = BufferIndex.splatIndices
+            renderEncoder.setVertexBuffer(sortedBuffer, offset: 0, index: BufferIndex.splatIndices.rawValue)
         }
         
         renderEncoder.drawIndexedPrimitives(type: .triangle,
@@ -789,6 +1161,18 @@ public class SplatRenderer {
         }
 
         renderEncoder.endEncoding()
+        updateFPS()
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        currentFPS = Double(fpsFrameCount) / elapsed
+        Self.log.debug("Rendering FPS: \(self.currentFPS)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 
     // Sort splatBuffer (read-only), storing the results in splatBuffer (write-only) then swap splatBuffer and splatBufferPrime

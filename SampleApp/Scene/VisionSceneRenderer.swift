@@ -4,7 +4,6 @@ import CompositorServices
 import Metal
 import MetalSplatter
 import os
-import SampleBoxRenderer
 import simd
 import Spatial
 import SwiftUI
@@ -18,7 +17,7 @@ extension LayerRenderer.Clock.Instant.Duration {
 
 class VisionSceneRenderer {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "VisionSceneRenderer",
                category: "VisionSceneRenderer")
 
     let layerRenderer: LayerRenderer
@@ -29,6 +28,9 @@ class VisionSceneRenderer {
     var modelRenderer: (any ModelRenderer)?
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
+    
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
 
     var lastRotationUpdateTimestamp: Date? = nil
     var rotation: Angle = .zero
@@ -60,13 +62,6 @@ class VisionSceneRenderer {
                                           maxSimultaneousRenders: Constants.maxSimultaneousRenders)
             try await splat.read(from: url)
             modelRenderer = splat
-        case .sampleBox:
-            modelRenderer = try! SampleBoxRenderer(device: device,
-                                                   colorFormat: layerRenderer.configuration.colorFormat,
-                                                   depthFormat: layerRenderer.configuration.depthFormat,
-                                                   sampleCount: 1,
-                                                   maxViewCount: layerRenderer.properties.viewCount,
-                                                   maxSimultaneousRenders: Constants.maxSimultaneousRenders)
         case .none:
             break
         }
@@ -127,6 +122,7 @@ class VisionSceneRenderer {
     }
 
     func renderFrame() {
+        updateFPS()
         guard let frame = layerRenderer.queryNextFrame() else { return }
 
         frame.startUpdate()
@@ -192,6 +188,17 @@ class VisionSceneRenderer {
                 }
             }
         }
+    }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        let fps = Double(fpsFrameCount) / elapsed
+        Self.log.debug("Vision render FPS: \(fps)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
     }
 }
 

@@ -4,13 +4,12 @@ import Metal
 import MetalKit
 import MetalSplatter
 import os
-import SampleBoxRenderer
 import simd
 import SwiftUI
 
 class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     private static let log =
-        Logger(subsystem: Bundle.main.bundleIdentifier!,
+        Logger(subsystem: Bundle.main.bundleIdentifier ?? "MetalKitSceneRenderer",
                category: "MetalKitSceneRenderer")
 
     let metalKitView: MTKView
@@ -22,6 +21,9 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
     let inFlightSemaphore = DispatchSemaphore(value: Constants.maxSimultaneousRenders)
     
+    private var fpsFrameCount = 0
+    private var fpsLastTimestamp = CFAbsoluteTimeGetCurrent()
+    
     // Enable gestures
     // Drag
     var yaw: Float = 0.0
@@ -32,6 +34,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var panX: Float = 0.0
     var panY: Float = 0.0
     public var manualTime: Float? = nil
+    public var showClusterColors: Bool = false
+    public var selectedClusterID: Int32 = -1  // -1 means show all
+    public var showDepthVisualization: Bool = false
+    
+    /// Returns true if cluster data is available for this scene
+    public var hasClusters: Bool {
+        (modelRenderer as? SplatRenderer)?.hasClusters ?? false
+    }
+    // Coordinate system mode: 0=default, 1=rotate X -90°, 2=rotate X +90°, 3=no rotation
+    public var coordinateMode: Int = 0
     // Total length of the video/animation in seconds
     var animationDuration: Double = 10.0
     
@@ -63,21 +75,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                // It is a directory: Assume Deformable Scene (ply + weights)
-                try await splat.loadDeformableScene(directory: url)
+                // It is a directory: Assume Deformable Scene (ply + weights + clusters)
+                try await splat.loadDeformableSceneClusters(directory: url)
             } else {
                 // It is a file: Standard Static Scene
                 try await splat.read(from: url)
             }
             
             modelRenderer = splat
-        case .sampleBox:
-            modelRenderer = try! await SampleBoxRenderer(device: device,
-                                                         colorFormat: metalKitView.colorPixelFormat,
-                                                         depthFormat: metalKitView.depthStencilPixelFormat,
-                                                         sampleCount: metalKitView.sampleCount,
-                                                         maxViewCount: 1,
-                                                         maxSimultaneousRenders: Constants.maxSimultaneousRenders)
         case .none:
             break
         }
@@ -94,19 +99,34 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let rotationMatrix = rotationMatrixX * rotationMatrixY
         
         let translationMatrix = matrix4x4_translation(panX, panY, cameraDistance)
-        // Turn common 3D GS PLY files rightside-up. This isn't generally meaningful, it just
-        // happens to be a useful default for the most common datasets at the moment.
-        let commonUpCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
+        
+        // Coordinate system calibration - different modes for different scene conventions
+        let coordinateCalibration: simd_float4x4
+        switch coordinateMode {
+        case 1:
+            // Z-up to Y-up: rotate -90° around X
+            coordinateCalibration = matrix4x4_rotation(radians: -.pi/2, axis: SIMD3<Float>(1, 0, 0))
+        case 2:
+            // Flip Z-up: rotate +90° around X
+            coordinateCalibration = matrix4x4_rotation(radians: .pi/2, axis: SIMD3<Float>(1, 0, 0))
+        case 3:
+            // No rotation (identity)
+            coordinateCalibration = matrix_identity_float4x4
+        default:
+            // Default: 180° around Z (original behavior for common 3DGS PLY files)
+            coordinateCalibration = matrix4x4_rotation(radians: .pi, axis: SIMD3<Float>(0, 0, 1))
+        }
 
         let viewport = MTLViewport(originX: 0, originY: 0, width: drawableSize.width, height: drawableSize.height, znear: 0, zfar: 1)
 
         return ModelRendererViewportDescriptor(viewport: viewport,
                                                projectionMatrix: projectionMatrix,
-                                               viewMatrix: translationMatrix * rotationMatrix * commonUpCalibration,
+                                               viewMatrix: translationMatrix * rotationMatrix * coordinateCalibration,
                                                screenSize: SIMD2(x: Int(drawableSize.width), y: Int(drawableSize.height)))
     }
 
     func draw(in view: MTKView) {
+        updateFPS()
         _ = inFlightSemaphore.wait(timeout: DispatchTime.distantFuture)
         
         guard let commandBuffer = commandQueue.makeCommandBuffer() else {
@@ -128,15 +148,18 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         // Deformation step
         let timeToPass: Float
+        let now = Date().timeIntervalSinceReferenceDate
         if let manualTime = manualTime {
             timeToPass = manualTime
         } else {
-            let now = Date().timeIntervalSinceReferenceDate
             let loopedTime = now.remainder(dividingBy: animationDuration)
             timeToPass = Float((loopedTime < 0 ? loopedTime + animationDuration : loopedTime) / animationDuration)
         }
         
         if let splatRenderer = modelRenderer as? SplatRenderer {
+            splatRenderer.useClusterColors = showClusterColors
+            splatRenderer.selectedClusterID = selectedClusterID
+            splatRenderer.useDepthVisualization = showDepthVisualization
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
         }
 
@@ -156,9 +179,43 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         commandBuffer.present(drawable)
         commandBuffer.commit()
     }
+    
+    private func updateFPS() {
+        fpsFrameCount += 1
+        let now = CFAbsoluteTimeGetCurrent()
+        let elapsed = now - fpsLastTimestamp
+        guard elapsed >= 1.0 else { return }
+        let fps = Double(fpsFrameCount) / elapsed
+        Self.log.debug("MTKView draw FPS: \(fps)")
+        fpsFrameCount = 0
+        fpsLastTimestamp = now
+    }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
         drawableSize = size
+    }
+    
+    /// Pick the cluster at a screen position. Returns the cluster ID or nil if nothing was hit.
+    func pickClusterAt(_ screenPoint: CGPoint) -> Int32? {
+        guard let splatRenderer = modelRenderer as? SplatRenderer else {
+            return nil
+        }
+        
+        // Use the same viewport as rendering
+        let viewportDesc = self.viewport
+        
+        let clusterID = splatRenderer.pickCluster(
+            at: screenPoint,
+            viewportSize: drawableSize,
+            viewport: SplatRenderer.ViewportDescriptor(
+                viewport: viewportDesc.viewport,
+                projectionMatrix: viewportDesc.projectionMatrix,
+                viewMatrix: viewportDesc.viewMatrix,
+                screenSize: viewportDesc.screenSize
+            )
+        )
+        
+        return clusterID >= 0 ? clusterID : nil
     }
 }
 
