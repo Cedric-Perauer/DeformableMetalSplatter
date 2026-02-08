@@ -68,7 +68,7 @@ https://github.com/user-attachments/assets/4f7c2aa8-b9bd-4563-ad21-1f4d2a68379c
 
 ## Dynamic Splats on iPhone 15
 
-https://github.com/user-attachments/assets/af05d8ee-b540-4838-9817-b1cde81c6afb
+https://github.com/user-attachments/assets/3cc26612-be2c-402c-98aa-e538ddf6d732
 
 
 # Acknowledgments
