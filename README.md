@@ -21,7 +21,7 @@ Please follow the steps in original [README](./README_Orig.md) to setup the proj
 - [ ] ...
 
 # Usage
-By selecting a folder in the startup page, the app loads the ```weights.bin```,```clusters.bin``` and ```point_cloud.ply``` inside the directory. You can download an example scene [as_novel_view](https://drive.google.com/drive/folders/1s6oHkxfwywKQ4eb6WwNz9CQr80wIQqa9?usp=sharing) from NeRF-DS trained with [TRASE](https://github.com/yunjinli/TRASE). 
+By selecting a folder in the startup page, the app loads the ```weights.bin```, ```clusters.bin``` and ```point_cloud.ply``` inside the directory. You can download example scenes from [here](https://drive.google.com/drive/folders/1WNnabmOoLe5aX9xD_rgFajjIEYVGgpVJ?usp=sharing) trained with [TRASE](https://github.com/yunjinli/TRASE). 
 
 There is a scroll bar for adjusting the time but you can also let it play by deactivating the manual time setting. You can toggle the additional dropdown to unlock additional options such as the [TRASE](https://github.com/yunjinli/TRASE) based instance segmentation "Show Clusters" and depth based visualisation "Depth" (based on camera viewpoint). Clicking on clusters will isolate them in the visualisation, showing the whole scene again can be done via "Show all" button. 
 
@@ -29,7 +29,7 @@ The gestures for X/Y Panning, Orbit, Zoom in/out are also implemented. As some s
 
 ## Using your own Scenes 
 
-0) Create env
+### Step 1: Create env
 
 ```
 conda create -n trase_model_converter python=3.10 -y
@@ -37,7 +37,7 @@ conda activate trase_model_converter
 pip install torch "numpy<2" torchinfo
 ```
 
-1) For dynamic splat scenes  
+### Step 2: For dynamic splat scenes  
 
 Output should be the base path of your input folder, where ```point_cloud.ply``` is stored.
 
@@ -46,7 +46,7 @@ Export the deform.pth via :
 python export_deform_weights.py --model <path-to-deform.pth> --output <path to deform output.bin>
 ```
 
-2) Optionally for clusters (store in same path as ```point_cloud.ply``` just like for 1) :
+### Step 3: Optionally for clusters (store in same path as ```point_cloud.ply``` just like for 1) :
 
 Train your scene with [TRASE](https://github.com/yunjinli/TRASE) and run the export script : 
 ```bash 
@@ -66,7 +66,7 @@ https://github.com/user-attachments/assets/eca6ebd1-7a0b-4ce4-836a-c89b5228afbe
 https://github.com/user-attachments/assets/4f7c2aa8-b9bd-4563-ad21-1f4d2a68379c
 
 
-## Dynamic Splats on iPhone 15
+## Dynamic Splats + Instances on iPhone 15
 
 https://github.com/user-attachments/assets/3cc26612-be2c-402c-98aa-e538ddf6d732
 
@@ -80,7 +80,7 @@ Modifications and new features are licensed under MIT License (Copyright © 2026
 
 # References
 
-If you find this useful for your own work, particularly the instance segmentation and selection please consider citing the related TRASE paper :
+If you find this useful for your own work, particularly the 3D segmentation please consider taking a look at TRASE's [code](https://github.com/yunjinli/TRASE), [paper](https://arxiv.org/pdf/2411.19290), and [website](https://yunjinli.github.io/project-sadg/). Give us a star if you find it interesting :)
 
 ```
 @article{li2024trase,
@@ -94,10 +94,7 @@ If you find this useful for your own work, particularly the instance segmentatio
 ## Contributors
 
 <div align="center">
-  <a href="https://github.com/yunjinli">
-    <img src="https://images.weserv.nl/?url=github.com/yunjinli.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Jim" />
-  </a>
-  &nbsp; &nbsp; <a href="https://github.com/Cedric-Perauer">
-    <img src="https://images.weserv.nl/?url=github.com/Cedric-Perauer.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Cedric" />
-  </a>
+  <a href="https://github.com/yunjinli"><img src="https://images.weserv.nl/?url=github.com/yunjinli.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Jim" /></a>
+  &nbsp; &nbsp; 
+  <a href="https://github.com/Cedric-Perauer"><img src="https://images.weserv.nl/?url=github.com/Cedric-Perauer.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Cedric" /></a>
 </div>
