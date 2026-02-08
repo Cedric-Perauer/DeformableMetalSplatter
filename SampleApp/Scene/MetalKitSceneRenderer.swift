@@ -66,13 +66,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         modelRenderer = nil
         switch model {
-        case .gaussianSplat(let url):
+        case .gaussianSplat(let url, let useFP16):
             let splat = try await SplatRenderer(device: device,
                                                 colorFormat: metalKitView.colorPixelFormat,
                                                 depthFormat: metalKitView.depthStencilPixelFormat,
                                                 sampleCount: metalKitView.sampleCount,
                                                 maxViewCount: 1,
                                                 maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            // Apply the precision setting before loading
+            splat.useFP16Deformation = useFP16
+            
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
                 // It is a directory: Assume Deformable Scene (ply + weights + clusters)
