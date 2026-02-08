@@ -68,7 +68,7 @@ https://github.com/user-attachments/assets/4f7c2aa8-b9bd-4563-ad21-1f4d2a68379c
 
 ## Dynamic Splats on iPhone 15
 
-https://github.com/user-attachments/assets/fee3bc1f-168a-4adb-b358-5274d74e6000
+https://github.com/user-attachments/assets/af05d8ee-b540-4838-9817-b1cde81c6afb
 
 
 # Acknowledgments
@@ -93,21 +93,11 @@ If you find this useful for your own work, particularly the instance segmentatio
 
 ## Contributors
 
-<table>
-  <tr>
-    <td align="center">
-        <a href="https://github.com/yunjinli">
-            <img src="https://images.weserv.nl/?url=github.com/yunjinli.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px;" alt="Jim"/>
-            <br />
-            <sub><b>Jim</b></sub>
-        </a>
-        </td>
-    <td align="center">
-      <a href="https://github.com/Cedric-Perauer">
-        <img src="https://images.weserv.nl/?url=github.com/Cedric-Perauer.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px;" alt="Cedric"/>
-        <br />
-        <sub><b>Cedric</b></sub>
-      </a>
-    </td>
-  </tr>
-</table>
+<div align="center">
+  <a href="https://github.com/yunjinli">
+    <img src="https://images.weserv.nl/?url=github.com/yunjinli.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Jim" />
+  </a>
+  &nbsp; &nbsp; <a href="https://github.com/Cedric-Perauer">
+    <img src="https://images.weserv.nl/?url=github.com/Cedric-Perauer.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px" title="Cedric" />
+  </a>
+</div>
