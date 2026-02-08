@@ -17,7 +17,8 @@ Please follow the steps in original [README](./README_Orig.md) to setup the proj
 - [x] Adding support to click objects
 - [x] add option to not use instance mode if clusters file is not provided (toggle disabled + warning shown)
 - [ ] add optional speedup via static vs dynamic splat masking (export_static_mask.py ready, Swift integration pending)
-- [ ] Update BibTex after 3DV proceedings are published 
+- [ ] Update BibTex after 3DV proceedings are published
+- [ ] ...
 
 # Usage
 By selecting a folder in the startup page, the app loads the ```weights.bin```,```clusters.bin``` and ```point_cloud.ply``` inside the directory. You can download an example scene [as_novel_view](https://drive.google.com/drive/folders/1s6oHkxfwywKQ4eb6WwNz9CQr80wIQqa9?usp=sharing) from NeRF-DS trained with [TRASE](https://github.com/yunjinli/TRASE). 
@@ -48,11 +49,13 @@ python export_clusters_bin.py --model <clusters.pt> --output <path to clusters o
 
 ## Dynamic Splats + Instances on iPhone 17 Air 
 
-<video src="assets/Iphone_sear_stake.mp4" controls width="600"></video>
+https://github.com/user-attachments/assets/eca6ebd1-7a0b-4ce4-836a-c89b5228afbe
+
 
 ## Dynamic Splats + Instances on iPad Pro (M1)
 
-<video src="assets/ipad_split_cookie.mp4" controls width="600"></video>
+
+https://github.com/user-attachments/assets/4f7c2aa8-b9bd-4563-ad21-1f4d2a68379c
 
 
 ## Dynamic Splats on iPhone 15
