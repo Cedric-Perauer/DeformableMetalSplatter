@@ -29,6 +29,14 @@ The gestures for X/Y Panning, Orbit, Zoom in/out are also implemented. As some s
 
 ## Using your own Scenes 
 
+0) Create env
+
+```
+conda create -n trase_model_converter python=3.10 -y
+conda activate trase_model_converter
+pip install torch "numpy<2" torchinfo
+```
+
 1) For dynamic splat scenes  
 
 Output should be the base path of your input folder, where ```point_cloud.ply``` is stored.
@@ -82,3 +90,24 @@ If you find this useful for your own work, particularly the instance segmentatio
     year={2024}
 }
 ```
+
+## Contributors
+
+<table>
+  <tr>
+    <td align="center">
+        <a href="https://github.com/yunjinli">
+            <img src="https://images.weserv.nl/?url=github.com/yunjinli.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px;" alt="Jim"/>
+            <br />
+            <sub><b>Jim</b></sub>
+        </a>
+        </td>
+    <td align="center">
+      <a href="https://github.com/Cedric-Perauer">
+        <img src="https://images.weserv.nl/?url=github.com/Cedric-Perauer.png&h=100&w=100&fit=cover&mask=circle&maxage=7d" width="100px;" alt="Cedric"/>
+        <br />
+        <sub><b>Cedric</b></sub>
+      </a>
+    </td>
+  </tr>
+</table>
