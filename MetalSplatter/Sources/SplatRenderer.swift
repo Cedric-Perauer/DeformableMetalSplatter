@@ -55,6 +55,7 @@ public class SplatRenderer {
         case splatIndices = 2
         case clusterColor = 3
         case clusterID = 4
+        case selectedClusters = 5
     }
 
     // Keep in sync with Shaders.metal : Uniforms (176 bytes total)
@@ -66,15 +67,17 @@ public class SplatRenderer {
         var splatCount: UInt32                 // 4 bytes  (offset 136)
         var indexedSplatCount: UInt32          // 4 bytes  (offset 140)
         var showClusterColors: UInt32          // 4 bytes  (offset 144)
-        var selectedClusterID: Int32           // 4 bytes  (offset 148) -1 means show all clusters
+        var selectedClusterID: Int32           // 4 bytes  (offset 148) -1 means show all clusters (single selection)
         
         var showDepthVisualization: UInt32     // 4 bytes  (offset 152)
-        var _pad1: UInt32 = 0                  // 4 bytes  (offset 156) for float2 alignment
+        var selectionMode: UInt32 = 0          // 4 bytes  (offset 156) 0=off, 1=selecting, 2=confirmed
         var depthRange: SIMD2<Float>           // 8 bytes  (offset 160) min/max depth
         
-        // Padding to match Metal's 16-byte struct alignment (total 176 bytes)
-        var _padding: SIMD2<UInt32> = .zero    // 8 bytes  (offset 168)
+        var selectedClusterCount: UInt32 = 0   // 4 bytes  (offset 168) number of selected clusters
+        var _pad2: UInt32 = 0                  // 4 bytes  (offset 172) padding
+        // Total: 176 bytes
     }
+
 
     // Keep in sync with Shaders.metal : UniformsArray
     struct UniformsArray {
@@ -165,6 +168,18 @@ public class SplatRenderer {
     
     // Picking support (screen-space based)
     private var maxClusterID: UInt32 = 0
+    
+    // Multi-cluster selection support
+    /// Selection mode: 0 = off, 1 = selecting (shows red), 2 = confirmed (filters)
+    public var selectionMode: UInt32 = 0
+    /// Set of cluster IDs that are currently selected
+    public var selectedClusters: Set<UInt32> = []
+    /// Buffer to pass selected cluster IDs to GPU
+    private var selectedClustersBuffer: MTLBuffer?
+    private let emptySelectedClustersBuffer: MTLBuffer
+    /// Max selected clusters (must match shader constant)
+    private static let maxSelectedClusters = 64
+
     
     public let device: MTLDevice
     public let colorFormat: MTLPixelFormat
@@ -280,6 +295,8 @@ public class SplatRenderer {
                                                          options: .storageModeShared)!
         self.emptyClusterIdBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.size,
                                                       options: .storageModeShared)!
+        self.emptySelectedClustersBuffer = device.makeBuffer(length: MemoryLayout<UInt32>.size * Self.maxSelectedClusters,
+                                                             options: .storageModeShared)!
 
         do {
             library = try device.makeDefaultLibrary(bundle: Bundle.module)
@@ -437,8 +454,10 @@ public class SplatRenderer {
             showClusterColors: 0,
             selectedClusterID: -1,
             showDepthVisualization: 0,
-            _pad1: 0,
-            depthRange: SIMD2(0.1, 10.0)
+            selectionMode: 0,
+            depthRange: SIMD2(0.1, 10.0),
+            selectedClusterCount: 0,
+            _pad2: 0
         )
         
         var params = PickingParams(
@@ -487,6 +506,24 @@ public class SplatRenderer {
         print("Found splat with cluster \(clusterID), score = \(minScore)")
         
         return clusterID
+    }
+    
+    /// Toggle a cluster in/out of the multi-selection set
+    public func toggleClusterSelection(_ clusterID: Int32) {
+        guard clusterID >= 0 else { return }
+        let id = UInt32(clusterID)
+        if selectedClusters.contains(id) {
+            selectedClusters.remove(id)
+        } else if selectedClusters.count < Self.maxSelectedClusters {
+            selectedClusters.insert(id)
+        }
+    }
+    
+    /// Clear all selected clusters
+    public func clearSelection() {
+        selectedClusters.removeAll()
+        selectionMode = 0
+        selectedClustersBuffer = nil
     }
 
     private func buildInitializePipelineState() throws -> MTLRenderPipelineState {
@@ -593,6 +630,9 @@ public class SplatRenderer {
             updateDepthRange(forViewports: viewports)
         }
         
+        // Update selected clusters buffer if needed
+        updateSelectedClustersBuffer()
+        
         for (i, viewport) in viewports.enumerated() where i <= maxViewCount {
             let uniforms = Uniforms(projectionMatrix: viewport.projectionMatrix,
                                     viewMatrix: viewport.viewMatrix,
@@ -602,8 +642,9 @@ public class SplatRenderer {
                                     showClusterColors: useClusterColors ? 1 : 0,
                                     selectedClusterID: selectedClusterID,
                                     showDepthVisualization: useDepthVisualization ? 1 : 0,
-                                    _pad1: 0,
-                                    depthRange: currentDepthRange)
+                                    selectionMode: selectionMode,
+                                    depthRange: currentDepthRange,
+                                    selectedClusterCount: UInt32(min(selectedClusters.count, Self.maxSelectedClusters)))
             self.uniforms.pointee.setUniforms(index: i, uniforms)
         }
 
@@ -612,6 +653,28 @@ public class SplatRenderer {
 
         if !sorting {
             resort()
+        }
+    }
+    
+    /// Update the selected clusters buffer with current selection
+    private func updateSelectedClustersBuffer() {
+        guard !selectedClusters.isEmpty else {
+            selectedClustersBuffer = nil
+            return
+        }
+        
+        let count = min(selectedClusters.count, Self.maxSelectedClusters)
+        let bufferSize = MemoryLayout<UInt32>.size * Self.maxSelectedClusters
+        
+        if selectedClustersBuffer == nil {
+            selectedClustersBuffer = device.makeBuffer(length: bufferSize, options: .storageModeShared)
+        }
+        
+        guard let buffer = selectedClustersBuffer else { return }
+        
+        let ptr = buffer.contents().assumingMemoryBound(to: UInt32.self)
+        for (i, clusterID) in selectedClusters.prefix(count).enumerated() {
+            ptr[i] = clusterID
         }
     }
     
@@ -1132,6 +1195,10 @@ public class SplatRenderer {
         renderEncoder.setVertexBuffer(clusterBuffer, offset: 0, index: BufferIndex.clusterColor.rawValue)
         let clusterIDBuffer = clusterIdBuffer ?? emptyClusterIdBuffer
         renderEncoder.setVertexBuffer(clusterIDBuffer, offset: 0, index: BufferIndex.clusterID.rawValue)
+        
+        // Bind selected clusters buffer for multi-selection
+        let selClustersBuffer = selectedClustersBuffer ?? emptySelectedClustersBuffer
+        renderEncoder.setVertexBuffer(selClustersBuffer, offset: 0, index: BufferIndex.selectedClusters.rawValue)
         
         if let sortedBuffer = sortedIndexBuffer?.buffer {
             renderEncoder.setVertexBuffer(sortedBuffer, offset: 0, index: BufferIndex.splatIndices.rawValue)

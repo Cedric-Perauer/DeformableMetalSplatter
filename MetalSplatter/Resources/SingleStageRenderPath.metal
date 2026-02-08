@@ -6,6 +6,7 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
                                                constant Splat* splatArray [[ buffer(BufferIndexSplat) ]],
                                                constant packed_float3* clusterColors [[ buffer(BufferIndexClusterColor) ]],
                                                constant uint* clusterIDs [[ buffer(BufferIndexClusterID) ]],
+                                               constant uint* selectedClusters [[ buffer(BufferIndexSelectedClusters) ]],
                                                constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
 
@@ -18,13 +19,14 @@ vertex FragmentIn singleStageSplatVertexShader(uint vertexID [[vertex_id]],
 
     Splat splat = splatArray[splatID];
 
-    return splatVertex(splat, uniforms, vertexID % 4, splatID, clusterColors, clusterIDs);
+    return splatVertex(splat, uniforms, vertexID % 4, splatID, clusterColors, clusterIDs, selectedClusters);
 }
 
 fragment half4 singleStageSplatFragmentShader(FragmentIn in [[stage_in]]) {
     half alpha = splatFragmentAlpha(in.relativePosition, in.color.a);
     return half4(alpha * in.color.rgb, alpha);
 }
+
 
 // === Picking Shaders ===
 // These render the cluster ID to a texture for click-to-select
