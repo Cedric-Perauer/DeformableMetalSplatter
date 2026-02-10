@@ -31,6 +31,7 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
                                               constant uint* splatIndices [[ buffer(BufferIndexSplatIndices) ]],
                                               constant packed_float3* clusterColors [[ buffer(BufferIndexClusterColor) ]],
                                               constant uint* clusterIDs [[ buffer(BufferIndexClusterID) ]],
+                                              constant uint* selectedClusters [[ buffer(BufferIndexSelectedClusters) ]],
                                               constant UniformsArray & uniformsArray [[ buffer(BufferIndexUniforms) ]]) {
     Uniforms uniforms = uniformsArray.uniforms[min(int(amplificationID), kMaxViewCount)];
 
@@ -45,7 +46,7 @@ vertex FragmentIn multiStageSplatVertexShader(uint vertexID [[vertex_id]],
     
     Splat splat = splatArray[actualSplatID];
 
-    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID, clusterColors, clusterIDs);
+    return splatVertex(splat, uniforms, vertexID % 4, actualSplatID, clusterColors, clusterIDs, selectedClusters);
 }
 
 fragment FragmentStore multiStageSplatFragmentShader(FragmentIn in [[stage_in]],

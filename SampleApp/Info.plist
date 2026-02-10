@@ -11,5 +11,7 @@
 		<key>UISceneConfigurations</key>
 		<dict/>
 	</dict>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required for AR visualization.</string>
 </dict>
 </plist>

@@ -73,17 +73,44 @@ void decomposeCovariance(float3 cov2D, thread float2 &v1, thread float2 &v2) {
     v2 = eigenvector2 * sqrt(lambda2);
 }
 
+// Helper: check if clusterID is in the selectedClusters array
+bool isClusterSelected(uint clusterID, constant uint *selectedClusters, uint count) {
+    for (uint i = 0; i < count && i < kMaxSelectedClusters; i++) {
+        if (selectedClusters[i] == clusterID) {
+            return true;
+        }
+    }
+    return false;
+}
+
 FragmentIn splatVertex(Splat splat,
                        Uniforms uniforms,
                        uint relativeVertexIndex,
                        uint splatIndex,
                        constant packed_float3 *clusterColors,
-                       constant uint *clusterIDs) {
+                       constant uint *clusterIDs,
+                       constant uint *selectedClusters) {
     FragmentIn out;
     
-    // Filter by selected cluster - cull splats not in the selected cluster
-    if (uniforms.selectedClusterID >= 0 && clusterIDs != nullptr) {
-        uint thisClusterID = clusterIDs[splatIndex];
+    uint thisClusterID = (clusterIDs != nullptr) ? clusterIDs[splatIndex] : 0;
+    bool clusterIsSelected = false;
+    
+    // Check if this cluster is in the multi-selection list
+    if (uniforms.selectionMode > 0 && selectedClusters != nullptr && uniforms.selectedClusterCount > 0) {
+        clusterIsSelected = isClusterSelected(thisClusterID, selectedClusters, uniforms.selectedClusterCount);
+    }
+    
+    // In confirmed mode (selectionMode == 2), cull splats not in selection
+    if (uniforms.selectionMode == 2 && uniforms.selectedClusterCount > 0) {
+        if (!clusterIsSelected) {
+            out.position = float4(2, 2, 0, 1);  // Off-screen = culled
+            out.color = half4(0);
+            return out;
+        }
+    }
+    
+    // Filter by single selected cluster (legacy behavior) - only when not in multi-selection mode
+    if (uniforms.selectionMode == 0 && uniforms.selectedClusterID >= 0 && clusterIDs != nullptr) {
         if (int(thisClusterID) != uniforms.selectedClusterID) {
             out.position = float4(2, 2, 0, 1);  // Off-screen = culled
             out.color = half4(0);
@@ -130,6 +157,12 @@ FragmentIn splatVertex(Splat splat,
     out.relativePosition = kBoundsRadius * relativeCoordinates;
     out.color = splat.color;
     
+    // In selection mode (selectionMode == 1), show selected clusters in red
+    if (uniforms.selectionMode == 1 && clusterIsSelected) {
+        out.color = half4(1.0, 0.2, 0.2, splat.color.a);  // Red tint for selected
+        return out;
+    }
+    
     // Depth visualization takes priority
     if (uniforms.showDepthVisualization != 0) {
         // Calculate view-space depth
@@ -156,3 +189,4 @@ half splatFragmentAlpha(half2 relativePosition, half splatAlpha) {
     half negativeMagnitudeSquared = -dot(relativePosition, relativePosition);
     return (negativeMagnitudeSquared < -kBoundsRadiusSquared) ? 0 : exp(0.5 * negativeMagnitudeSquared) * splatAlpha;
 }
+

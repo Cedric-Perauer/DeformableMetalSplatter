@@ -23,6 +23,10 @@ struct MetalKitSceneView: View {
     @State private var coordinateMode: Int = 0  // 0=default, 1=Z-up→Y-up, 2=flip, 3=none
     @State private var hasClusters: Bool = false  // Whether clusters.bin was loaded
     
+    // Multi-selection mode
+    @State private var isSelectingMode: Bool = false  // Whether in multi-cluster selection mode
+    @State private var selectedClusterCount: Int = 0  // Number of selected clusters
+    
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
 
     var body: some View {
@@ -34,7 +38,9 @@ struct MetalKitSceneView: View {
                           showDepthVisualization: showDepthVisualization,
                           selectedClusterID: $selectedClusterID,
                           coordinateMode: coordinateMode,
-                          hasClusters: $hasClusters)
+                          hasClusters: $hasClusters,
+                          isSelectingMode: $isSelectingMode,
+                          selectedClusterCount: $selectedClusterCount)
                     .ignoresSafeArea()
                     .onChange(of: hasClusters) { _, newValue in
                         // Auto-disable cluster colors if clusters become unavailable
@@ -63,9 +69,11 @@ struct MetalKitSceneView: View {
                         Spacer()
                     }
                     
-                    if selectedClusterID >= 0 {
+                    if selectedClusterID >= 0 || selectedClusterCount > 0 {
                         Button("Show All") {
                             selectedClusterID = -1
+                            selectedClusterCount = 0
+                            isSelectingMode = false
                         }
                         .buttonStyle(.bordered)
                         .font(.caption)
@@ -136,16 +144,50 @@ struct MetalKitSceneView: View {
                         .background(.ultraThinMaterial)
                         .cornerRadius(8)
                         
-                        // Cluster selection info
-                        HStack {
-                            if selectedClusterID >= 0 {
+                        // Multi-cluster selection controls
+                        HStack(spacing: 8) {
+                            if isSelectingMode {
+                                // In selection mode
+                                Text("\(selectedClusterCount) selected")
+                                    .font(.system(.caption, design: .monospaced))
+                                    .foregroundStyle(.white)
+                                
+                                Button("Confirm") {
+                                    isSelectingMode = false
+                                    // Mode will be set to 2 (confirmed) in MetalView
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.green)
+                                .font(.caption)
+                                
+                                Button("Cancel") {
+                                    isSelectingMode = false
+                                    selectedClusterCount = 0
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.red)
+                                .font(.caption)
+                            } else if selectedClusterCount > 0 {
+                                // Confirmed selection active
+                                Text("Showing \(selectedClusterCount) clusters")
+                                    .font(.caption)
+                                    .foregroundStyle(.white.opacity(0.8))
+                                
+                            } else if selectedClusterID >= 0 {
+                                // Single cluster selection (legacy)
                                 Text("Cluster: \(selectedClusterID)")
                                     .font(.system(.caption, design: .monospaced))
                                     .foregroundStyle(.white)
                             } else {
-                                Text("Tap splat to isolate cluster")
-                                    .font(.caption)
-                                    .foregroundStyle(.white.opacity(0.8))
+                                // No selection
+                                Button("Object Selection") {
+                                    isSelectingMode = true
+                                    selectedClusterID = -1  // Clear single selection
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.blue)
+                                .font(.caption)
+                                .disabled(!hasClusters)
                             }
                         }
                         .padding(8)
@@ -188,12 +230,16 @@ private struct MetalView: ViewRepresentable {
     @Binding var selectedClusterID: Int32
     var coordinateMode: Int
     @Binding var hasClusters: Bool
+    @Binding var isSelectingMode: Bool
+    @Binding var selectedClusterCount: Int
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
         var startCameraDistance: Float = 0.0
         var selectedClusterIDBinding: Binding<Int32>?
         var hasClustersBinding: Binding<Bool>?
+        var isSelectingModeBinding: Binding<Bool>?
+        var selectedClusterCountBinding: Binding<Int>?
         
 #if os(iOS)
         @objc func handleTap(_ gesture: UITapGestureRecognizer) {
@@ -217,8 +263,10 @@ private struct MetalView: ViewRepresentable {
             )
 
             if let clusterID = renderer.pickClusterAt(screenPoint) {
-                selectedClusterIDBinding?.wrappedValue = clusterID
-                renderer.selectedClusterID = clusterID
+                if isSelectingModeBinding?.wrappedValue == true {
+                    renderer.toggleClusterSelection(clusterID)
+                    selectedClusterCountBinding?.wrappedValue = renderer.selectedClusterCount
+                }
             }
         }
 
@@ -264,6 +312,8 @@ private struct MetalView: ViewRepresentable {
         let coordinator = Coordinator()
         coordinator.selectedClusterIDBinding = $selectedClusterID
         coordinator.hasClustersBinding = $hasClusters
+        coordinator.isSelectingModeBinding = $isSelectingMode
+        coordinator.selectedClusterCountBinding = $selectedClusterCount
         return coordinator
     }
 
@@ -293,6 +343,9 @@ private struct MetalView: ViewRepresentable {
         context.coordinator.renderer?.manualTime = manualTime
         context.coordinator.selectedClusterIDBinding = $selectedClusterID
         context.coordinator.hasClustersBinding = $hasClusters
+        context.coordinator.isSelectingModeBinding = $isSelectingMode
+        context.coordinator.selectedClusterCountBinding = $selectedClusterCount
+        
         if let showClusterColors {
             context.coordinator.renderer?.showClusterColors = showClusterColors
         }
@@ -301,8 +354,17 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
-        // Update hasClusters state from renderer
+        
+        // Pass selection mode to renderer
+        // 0=off, 1=selecting, 2=confirmed (if not selecting but count > 0)
+        let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? 2 : 0)
+        context.coordinator.renderer?.selectionMode = mode
+        
+        // Update hasClusters state from renderer and handle selection
         if let renderer = context.coordinator.renderer {
+            if selectedClusterCount == 0 && !renderer.selectedClusters.isEmpty {
+                renderer.clearSelection()
+            }
             context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
         }
         updateView(context.coordinator)
@@ -329,8 +391,10 @@ private struct MetalView: ViewRepresentable {
             let screenPoint = CGPoint(x: location.x * scale, y: flippedY * scale)
             
             if let clusterID = renderer.pickClusterAt(screenPoint) {
-                coordinator?.selectedClusterIDBinding?.wrappedValue = clusterID
-                renderer.selectedClusterID = clusterID
+                if coordinator?.isSelectingModeBinding?.wrappedValue == true {
+                    renderer.toggleClusterSelection(clusterID)
+                    coordinator?.selectedClusterCountBinding?.wrappedValue = renderer.selectedClusterCount
+                }
             }
         }
         
@@ -418,6 +482,9 @@ private struct MetalView: ViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
         context.coordinator.hasClustersBinding = $hasClusters
+        context.coordinator.isSelectingModeBinding = $isSelectingMode
+        context.coordinator.selectedClusterCountBinding = $selectedClusterCount
+        
         if let showClusterColors {
             context.coordinator.renderer?.showClusterColors = showClusterColors
         }
@@ -426,12 +493,23 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
-        // Update hasClusters state from renderer
+        
+        // Pass selection mode to renderer
+        // 0=off, 1=selecting, 2=confirmed (if not selecting but count > 0)
+        let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? 2 : 0)
+        context.coordinator.renderer?.selectionMode = mode
+        
+        // Update hasClusters state from renderer and handle selection
         if let renderer = context.coordinator.renderer {
+            if selectedClusterCount == 0 && !renderer.selectedClusters.isEmpty {
+                renderer.clearSelection()
+            }
             context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
         }
         updateView(context.coordinator)
     }
+
+
 #endif // os(iOS)
 
     private func loadModel(_ renderer: MetalKitSceneRenderer?, coordinator: Coordinator) {

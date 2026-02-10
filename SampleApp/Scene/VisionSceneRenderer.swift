@@ -53,13 +53,15 @@ class VisionSceneRenderer {
 
         modelRenderer = nil
         switch model {
-        case .gaussianSplat(let url):
+        case .gaussianSplat(let url, let useFP16):
             let splat = try SplatRenderer(device: device,
                                           colorFormat: layerRenderer.configuration.colorFormat,
                                           depthFormat: layerRenderer.configuration.depthFormat,
                                           sampleCount: 1,
                                           maxViewCount: layerRenderer.properties.viewCount,
                                           maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            // Apply the precision setting before loading
+            splat.useFP16Deformation = useFP16
             try await splat.read(from: url)
             modelRenderer = splat
         case .none:

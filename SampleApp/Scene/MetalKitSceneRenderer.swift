@@ -38,6 +38,26 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
     
+    // Multi-selection
+    public var selectionMode: UInt32 = 0
+    
+    public var selectedClusterCount: Int {
+        (modelRenderer as? SplatRenderer)?.selectedClusters.count ?? 0
+    }
+    
+    public var selectedClusters: Set<UInt32> {
+        (modelRenderer as? SplatRenderer)?.selectedClusters ?? []
+    }
+    
+    func toggleClusterSelection(_ clusterID: Int32) {
+        (modelRenderer as? SplatRenderer)?.toggleClusterSelection(clusterID)
+    }
+    
+    func clearSelection() {
+        selectionMode = 0
+        (modelRenderer as? SplatRenderer)?.clearSelection()
+    }
+    
     /// Returns true if cluster data is available for this scene
     public var hasClusters: Bool {
         (modelRenderer as? SplatRenderer)?.hasClusters ?? false
@@ -66,13 +86,16 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         modelRenderer = nil
         switch model {
-        case .gaussianSplat(let url):
-            let splat = try await SplatRenderer(device: device,
-                                                colorFormat: metalKitView.colorPixelFormat,
-                                                depthFormat: metalKitView.depthStencilPixelFormat,
-                                                sampleCount: metalKitView.sampleCount,
-                                                maxViewCount: 1,
-                                                maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+        case .gaussianSplat(let url, let useFP16):
+            let splat = try SplatRenderer(device: device,
+                                          colorFormat: metalKitView.colorPixelFormat,
+                                          depthFormat: metalKitView.depthStencilPixelFormat,
+                                          sampleCount: metalKitView.sampleCount,
+                                          maxViewCount: 1,
+                                          maxSimultaneousRenders: Constants.maxSimultaneousRenders)
+            // Apply the precision setting before loading
+            splat.useFP16Deformation = useFP16
+            
             var isDirectory: ObjCBool = false
             if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
                 // It is a directory: Assume Deformable Scene (ply + weights + clusters)
@@ -160,6 +183,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             splatRenderer.useClusterColors = showClusterColors
             splatRenderer.selectedClusterID = selectedClusterID
             splatRenderer.useDepthVisualization = showDepthVisualization
+            splatRenderer.selectionMode = selectionMode
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
         }
 
