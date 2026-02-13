@@ -13,6 +13,10 @@ private typealias ViewRepresentable = UIViewRepresentable
 struct MetalKitSceneView: View {
     var modelIdentifier: ModelIdentifier?
     
+    init(modelIdentifier: ModelIdentifier?) {
+        self.modelIdentifier = modelIdentifier
+    }
+    
     // State for the slider
     @State private var time: Float = 0.0
     @State private var isManualTime: Bool = true
@@ -26,18 +30,21 @@ struct MetalKitSceneView: View {
     // Multi-selection mode
     @State private var isSelectingMode: Bool = false  // Whether in multi-cluster selection mode
     @State private var selectedClusterCount: Int = 0  // Number of selected clusters
+    @State private var deleteSelected: Bool = false  // If true, hide selected clusters instead of showing only them
     
     // Capture / CLIP encoding
     @State private var captureRequest: Bool = false
     @State private var isEncodingClusters: Bool = false
     @State private var hasClipFeatures: Bool = false
     @State private var encodingProgressText: String = ""  // e.g. "3 / 15"
+    @State private var useMaskedCrops: Bool = false  // Mask non-cluster pixels in crops
     
     // CLIP text query
     @State private var queryText: String = ""
     @State private var queryTopResult: String = ""
     @State private var searchRequest: Bool = false
     @State private var queryStatusText: String = ""
+    @State private var queryTopK: Int = 1  // Number of top clusters to select
     
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
 
@@ -51,15 +58,18 @@ struct MetalKitSceneView: View {
                           selectedClusterID: $selectedClusterID,
                           coordinateMode: coordinateMode,
                           hasClusters: $hasClusters,
+                          useMaskedCrops: useMaskedCrops,
                           isSelectingMode: $isSelectingMode,
                           selectedClusterCount: $selectedClusterCount,
+                          deleteSelected: $deleteSelected,
                           captureRequest: $captureRequest,
                           isEncodingClusters: $isEncodingClusters,
                           hasClipFeatures: $hasClipFeatures,
                           queryText: $queryText,
                           encodingProgressText: $encodingProgressText,
                           searchRequest: $searchRequest,
-                          queryStatusText: $queryStatusText)
+                          queryStatusText: $queryStatusText,
+                          queryTopK: $queryTopK)
                     .ignoresSafeArea()
                     .onChange(of: hasClusters) { _, newValue in
                         // Auto-disable cluster colors if clusters become unavailable
@@ -93,6 +103,7 @@ struct MetalKitSceneView: View {
                             selectedClusterID = -1
                             selectedClusterCount = 0
                             isSelectingMode = false
+                            deleteSelected = false
                             queryText = ""
                             queryTopResult = ""
                             queryStatusText = ""
@@ -182,6 +193,15 @@ struct MetalKitSceneView: View {
                                 .tint(.green)
                                 .font(.caption)
                                 
+                                Button("Delete") {
+                                    isSelectingMode = false
+                                    // Mode will be set to 3 (delete/hide) in MetalView
+                                    deleteSelected = true
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(.orange)
+                                .font(.caption)
+                                
                                 Button("Cancel") {
                                     isSelectingMode = false
                                     selectedClusterCount = 0
@@ -190,10 +210,18 @@ struct MetalKitSceneView: View {
                                 .tint(.red)
                                 .font(.caption)
                             } else if selectedClusterCount > 0 {
-                                // Confirmed selection active
-                                Text("Showing \(selectedClusterCount) clusters")
+                                // Confirmed/deleted selection active
+                                Text("\(deleteSelected ? "Hiding" : "Showing") \(selectedClusterCount) clusters")
                                     .font(.caption)
                                     .foregroundStyle(.white.opacity(0.8))
+                                
+                                Button("Edit") {
+                                    isSelectingMode = true
+                                    deleteSelected = false
+                                }
+                                .buttonStyle(.bordered)
+                                .tint(.blue)
+                                .font(.caption)
                                 
                             } else if selectedClusterID >= 0 {
                                 // Single cluster selection (legacy)
@@ -217,30 +245,38 @@ struct MetalKitSceneView: View {
                         .cornerRadius(8)
                         
                         // Encode Clusters with CLIP
-                        Button(action: {
-                            captureRequest = true
-                            isEncodingClusters = true
-                            encodingProgressText = "Starting…"
-                        }) {
-                            HStack(spacing: 4) {
-                                if isEncodingClusters {
-                                    ProgressView()
-                                        .scaleEffect(0.7)
-                                } else {
-                                    Image(systemName: hasClipFeatures ? "checkmark.circle.fill" : "brain")
-                                }
-                                if isEncodingClusters && !encodingProgressText.isEmpty {
-                                    Text(encodingProgressText)
-                                } else if hasClipFeatures {
-                                    Text("Re-encode Clusters")
-                                } else {
-                                    Text("Encode Clusters (CLIP)")
+                        HStack(spacing: 6) {
+                            Toggle("Mask", isOn: $useMaskedCrops)
+                                .toggleStyle(.button)
+                                .font(.caption)
+                                .disabled(isEncodingClusters)
+                                .help("Mask out non-cluster pixels before CLIP encoding")
+                            
+                            Button(action: {
+                                captureRequest = true
+                                isEncodingClusters = true
+                                encodingProgressText = "Starting…"
+                            }) {
+                                HStack(spacing: 4) {
+                                    if isEncodingClusters {
+                                        ProgressView()
+                                            .scaleEffect(0.7)
+                                    } else {
+                                        Image(systemName: hasClipFeatures ? "checkmark.circle.fill" : "brain")
+                                    }
+                                    if isEncodingClusters && !encodingProgressText.isEmpty {
+                                        Text(encodingProgressText)
+                                    } else if hasClipFeatures {
+                                        Text("Re-encode Clusters")
+                                    } else {
+                                        Text("Encode Clusters (CLIP)")
+                                    }
                                 }
                             }
+                            .buttonStyle(.bordered)
+                            .tint(hasClipFeatures ? .green : .blue)
+                            .disabled(isEncodingClusters || !hasClusters)
                         }
-                        .buttonStyle(.bordered)
-                        .tint(hasClipFeatures ? .green : .blue)
-                        .disabled(isEncodingClusters || !hasClusters)
                         .padding(8)
                         .background(.ultraThinMaterial)
                         .cornerRadius(8)
@@ -284,6 +320,29 @@ struct MetalKitSceneView: View {
                             .padding(.vertical, 8)
                             .background(.ultraThinMaterial)
                             .cornerRadius(8)
+                            
+                            // Top-K selector
+                            HStack(spacing: 6) {
+                                Text("Top K")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.6))
+                                Button(action: { if queryTopK > 1 { queryTopK -= 1 } }) {
+                                    Image(systemName: "minus.circle")
+                                        .foregroundStyle(.white.opacity(queryTopK > 1 ? 0.8 : 0.3))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(queryTopK <= 1)
+                                Text("\(queryTopK)")
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.white)
+                                    .frame(width: 24, alignment: .center)
+                                Button(action: { queryTopK += 1 }) {
+                                    Image(systemName: "plus.circle")
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(.horizontal, 10)
                             
                             if !queryStatusText.isEmpty {
                                 Text(queryStatusText)
@@ -360,8 +419,10 @@ private struct MetalView: ViewRepresentable {
     @Binding var selectedClusterID: Int32
     var coordinateMode: Int
     @Binding var hasClusters: Bool
+    var useMaskedCrops: Bool
     @Binding var isSelectingMode: Bool
     @Binding var selectedClusterCount: Int
+    @Binding var deleteSelected: Bool
     @Binding var captureRequest: Bool
     @Binding var isEncodingClusters: Bool
     @Binding var hasClipFeatures: Bool
@@ -369,6 +430,7 @@ private struct MetalView: ViewRepresentable {
     @Binding var encodingProgressText: String
     @Binding var searchRequest: Bool
     @Binding var queryStatusText: String
+    @Binding var queryTopK: Int
 
     class Coordinator: NSObject {
         var renderer: MetalKitSceneRenderer?
@@ -383,6 +445,7 @@ private struct MetalView: ViewRepresentable {
         var encodingProgressTextBinding: Binding<String>?
         var searchRequestBinding: Binding<Bool>?
         var queryStatusTextBinding: Binding<String>?
+        var queryTopKBinding: Binding<Int>?
         /// Tracks last query text to avoid redundant queries
         var lastQueryText: String = ""
         /// Cached CLIP features to survive renderer/view lifecycle resets
@@ -432,21 +495,23 @@ private struct MetalView: ViewRepresentable {
 
             queryStatusTextBinding?.wrappedValue = "Searching…"
             
-            let selectedIDs = renderer.queryText(text)
+            let topK = queryTopKBinding?.wrappedValue ?? 1
+            let selectedIDs = renderer.queryText(text, topK: topK)
             
             renderer.clearSelection()
             for id in selectedIDs {
                 renderer.toggleClusterSelection(Int32(id))
             }
-            renderer.selectionMode = 2
+            // Enter selection mode so user can review/adjust before confirm or delete
+            renderer.selectionMode = 1
             
             selectedClusterCountBinding?.wrappedValue = selectedIDs.count
-            isSelectingModeBinding?.wrappedValue = false
+            isSelectingModeBinding?.wrappedValue = true
             
             if selectedIDs.isEmpty {
-                queryStatusTextBinding?.wrappedValue = "No matching clusters found"
+                queryStatusTextBinding?.wrappedValue = "No matches found"
             } else {
-                queryStatusTextBinding?.wrappedValue = "Found \(selectedIDs.count) cluster(s)"
+                queryStatusTextBinding?.wrappedValue = "Found top \(selectedIDs.count) cluster(s)"
             }
             
             DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
@@ -533,6 +598,7 @@ private struct MetalView: ViewRepresentable {
         coordinator.encodingProgressTextBinding = $encodingProgressText
         coordinator.searchRequestBinding = $searchRequest
         coordinator.queryStatusTextBinding = $queryStatusText
+        coordinator.queryTopKBinding = $queryTopK
         return coordinator
     }
 
@@ -610,8 +676,8 @@ private struct MetalView: ViewRepresentable {
         
         coordinator.queryStatusTextBinding?.wrappedValue = "Searching…"
         
-        // Run query and select the top cluster
-        let selectedIDs = renderer.queryText(text, topK: 1)
+        // Run query and select top-K clusters
+        let selectedIDs = renderer.queryText(text, topK: queryTopK)
 
         // Use multi-selection to highlight the result
         renderer.clearSelection()
@@ -680,9 +746,13 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
+        // Derive deformationEnabled from model identifier (set on start screen)
+        let deformEnabledNS = modelIdentifier?.deformationEnabled ?? true
+        context.coordinator.renderer?.deformationEnabled = deformEnabledNS
+        context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
         
         // Pass selection mode to renderer
-        let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? 2 : 0)
+        let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)
         context.coordinator.renderer?.selectionMode = mode
         
         // Update hasClusters state from renderer and handle selection
@@ -690,8 +760,12 @@ private struct MetalView: ViewRepresentable {
             if selectedClusterCount == 0 && !renderer.selectedClusters.isEmpty {
                 renderer.clearSelection()
             }
-            context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
-            context.coordinator.hasClipFeaturesBinding?.wrappedValue = renderer.clipService.hasFeatures
+            let hasClustersNow = renderer.hasClusters
+            let hasFeaturesNow = renderer.clipService.hasFeatures
+            DispatchQueue.main.async {
+                context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
+                context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
+            }
             
             // Set up callback if needed
             if renderer.onEncodingComplete == nil {
@@ -702,8 +776,8 @@ private struct MetalView: ViewRepresentable {
         if captureRequest {
             print("[CLIP-DEBUG] captureRequest=true in updateNSView, setting captureNextFrame")
             context.coordinator.renderer?.captureNextFrame = true
-            isEncodingClusters = true
             DispatchQueue.main.async {
+                isEncodingClusters = true
                 captureRequest = false
             }
         }
@@ -852,9 +926,13 @@ private struct MetalView: ViewRepresentable {
         }
         context.coordinator.renderer?.selectedClusterID = selectedClusterID
         context.coordinator.renderer?.coordinateMode = coordinateMode
+        // Derive deformationEnabled from model identifier (set on start screen)
+        let deformEnabled = modelIdentifier?.deformationEnabled ?? true
+        context.coordinator.renderer?.deformationEnabled = deformEnabled
+        context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
         
         // Pass selection mode to renderer
-        let uiMode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? 2 : 0)
+        let uiMode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)
         context.coordinator.renderer?.selectionMode = uiMode
         
         // Update hasClusters state from renderer and handle selection
@@ -862,8 +940,12 @@ private struct MetalView: ViewRepresentable {
             if selectedClusterCount == 0 && !renderer.selectedClusters.isEmpty {
                 renderer.clearSelection()
             }
-            context.coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
-            context.coordinator.hasClipFeaturesBinding?.wrappedValue = renderer.clipService.hasFeatures
+            let hasClustersNow = renderer.hasClusters
+            let hasFeaturesNow = renderer.clipService.hasFeatures
+            DispatchQueue.main.async {
+                context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
+                context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
+            }
             
             // Set up callback if needed
             if renderer.onEncodingComplete == nil {
@@ -873,8 +955,8 @@ private struct MetalView: ViewRepresentable {
         if captureRequest {
             print("[CLIP-DEBUG] captureRequest=true in updateUIView, setting captureNextFrame")
             context.coordinator.renderer?.captureNextFrame = true
-            isEncodingClusters = true
             DispatchQueue.main.async {
+                isEncodingClusters = true
                 captureRequest = false
             }
         }

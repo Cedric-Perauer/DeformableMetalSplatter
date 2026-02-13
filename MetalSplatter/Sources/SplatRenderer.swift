@@ -137,6 +137,9 @@ public class SplatRenderer {
     /// If true, the deformation MPSGraph uses FP16 weights/compute (casts I/O to/from FP32).
     /// This is a major speed win on Apple GPUs, but can introduce small numeric differences.
     public var useFP16Deformation: Bool = true
+    /// When true, apply full deformation (position + rotation + scale deltas).
+    /// When false, smooth mode: apply position deltas only, preserve canonical rotation and scale.
+    public var applyRotationDeltas: Bool = true
     public var useClusterColors: Bool = false
     public var selectedClusterID: Int32 = -1  // -1 means show all clusters
     
@@ -1057,6 +1060,8 @@ public class SplatRenderer {
             enc.setBuffer(bDRot, offset: 0, index: 2)
             enc.setBuffer(bDScale, offset: 0, index: 3)
             enc.setBuffer(splatBuffer.buffer, offset: 0, index: 4)
+            var rotDeltaFlag: UInt32 = applyRotationDeltas ? 1 : 0
+            enc.setBytes(&rotDeltaFlag, length: MemoryLayout<UInt32>.size, index: 5)
             
             let w = applyPipe.threadExecutionWidth
             let applyStart = CFAbsoluteTimeGetCurrent()

@@ -109,6 +109,15 @@ FragmentIn splatVertex(Splat splat,
         }
     }
     
+    // In delete/hide mode (selectionMode == 3), cull splats IN selection
+    if (uniforms.selectionMode == 3 && uniforms.selectedClusterCount > 0) {
+        if (clusterIsSelected) {
+            out.position = float4(2, 2, 0, 1);  // Off-screen = culled
+            out.color = half4(0);
+            return out;
+        }
+    }
+    
     // Filter by single selected cluster (legacy behavior) - only when not in multi-selection mode
     if (uniforms.selectionMode == 0 && uniforms.selectedClusterID >= 0 && clusterIDs != nullptr) {
         if (int(thisClusterID) != uniforms.selectedClusterID) {

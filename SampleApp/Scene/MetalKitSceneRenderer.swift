@@ -39,6 +39,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var showClusterColors: Bool = false
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
+    public var deformationEnabled: Bool = true
+    public var useMaskedCrops: Bool = false
     
     // Multi-selection
     public var selectionMode: UInt32 = 0
@@ -100,7 +102,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     }
 
     private func clipCacheKey(for model: ModelIdentifier?) -> String? {
-        guard case .gaussianSplat(let url, _) = model else { return nil }
+        guard case .gaussianSplat(let url, _, _) = model else { return nil }
         return url.standardizedFileURL.path
     }
 
@@ -140,7 +142,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
 
         modelRenderer = nil
         switch model {
-        case .gaussianSplat(let url, let useFP16):
+        case .gaussianSplat(let url, let useFP16, _):
             let splat = try SplatRenderer(device: device,
                                           colorFormat: metalKitView.colorPixelFormat,
                                           depthFormat: metalKitView.depthStencilPixelFormat,
@@ -240,6 +242,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             splatRenderer.selectedClusterID = selectedClusterID
             splatRenderer.useDepthVisualization = showDepthVisualization
             splatRenderer.selectionMode = selectionMode
+            splatRenderer.applyRotationDeltas = deformationEnabled
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
         }
 
@@ -316,9 +319,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
                 }
                 
                 // Dispatch encoding to a background queue so it doesn't block the Metal callback
+                let masked = self.useMaskedCrops
                 DispatchQueue.global(qos: .userInitiated).async {
-                    print("[CLIP-DEBUG] Background encoding started")
-                    self.clipService.encodeClusterCrops(rgb: rgbTexture, clusters: clusterTexture)
+                    print("[CLIP-DEBUG] Background encoding started (masked=\(masked))")
+                    self.clipService.encodeClusterCrops(rgb: rgbTexture, clusters: clusterTexture, useMaskedCrops: masked)
                     print("[CLIP-DEBUG] Background encoding finished, hasFeatures=\(self.clipService.hasFeatures)")
                     DispatchQueue.main.async {
                         self.cacheCurrentCLIPFeatures()
@@ -383,13 +387,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     
     // Helper to save frame
     /// Query the CLIP features with a text prompt and update `queryResults`.
-    /// Returns the top matching cluster IDs.
+    /// Returns the top-K cluster IDs sorted by descending cosine similarity.
     func queryText(_ text: String, topK: Int = 1) -> Set<UInt32> {
         _ = ensureCLIPFeaturesReady()
         let results = clipService.query(text: text)
         queryResults = results
         
-        // Return top-k cluster IDs
+        // Return top-K cluster IDs
         let selectedIDs = results.prefix(topK).map { UInt32($0.clusterID) }
         return Set(selectedIDs)
     }

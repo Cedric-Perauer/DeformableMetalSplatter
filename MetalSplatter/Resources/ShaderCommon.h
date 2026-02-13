@@ -36,7 +36,7 @@ typedef struct {
                           // (single selection)
 
   uint showDepthVisualization; // 4 bytes  (offset 152)
-  uint selectionMode; // 4 bytes  (offset 156) 0=off, 1=selecting, 2=confirmed
+  uint selectionMode; // 4 bytes  (offset 156) 0=off, 1=selecting, 2=confirmed, 3=delete(hide)
   float2 depthRange;  // 8 bytes  (offset 160) min/max depth for visualization
 
   uint

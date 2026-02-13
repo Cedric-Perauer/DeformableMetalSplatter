@@ -386,7 +386,7 @@ public class CLIPService {
 
     /// Given RGB and cluster-ID textures from the renderer, extract per-cluster bounding-box crops
     /// and encode each one with the image encoder. Stores results in `clusterFeatures` / `clusterIDs`.
-    func encodeClusterCrops(rgb: MTLTexture, clusters: MTLTexture) {
+    func encodeClusterCrops(rgb: MTLTexture, clusters: MTLTexture, useMaskedCrops: Bool = false) {
         let width = rgb.width
         let height = rgb.height
         print("[CLIP-DEBUG] encodeClusterCrops called: rgb=\(width)x\(height), clusters=\(clusters.width)x\(clusters.height)")
@@ -421,13 +421,15 @@ public class CLIPService {
             print("[CLIP-DEBUG] Unique cluster IDs: \(uniqueIDs.sorted())")
         }
 
-        // Find unique cluster IDs and their bounding boxes
+        // Find unique cluster IDs, their bounding boxes, and pixel counts
         var bboxes: [Int32: (minX: Int, minY: Int, maxX: Int, maxY: Int)] = [:]
+        var pixelCounts: [Int32: Int] = [:]
 
         for y in 0..<height {
             for x in 0..<width {
                 let cid = clusterData[y * width + x]
                 if cid < 0 { continue }
+                pixelCounts[cid, default: 0] += 1
                 if var bb = bboxes[cid] {
                     bb.minX = min(bb.minX, x)
                     bb.minY = min(bb.minY, y)
@@ -440,23 +442,30 @@ public class CLIPService {
             }
         }
 
-        print("[CLIP-DEBUG] Found \(bboxes.count) cluster bounding boxes")
-        for (cid, bb) in bboxes.sorted(by: { $0.key < $1.key }) {
+        // Filter out clusters with too few visible pixels (< 0.05% of viewport)
+        let minPixelCount = max(50, (width * height) / 2000)
+        let visibleClusterIDs = bboxes.keys.filter { (pixelCounts[$0] ?? 0) >= minPixelCount }
+        let discardedCount = bboxes.count - visibleClusterIDs.count
+        
+        print("[CLIP-DEBUG] Found \(bboxes.count) cluster bounding boxes, \(discardedCount) discarded (< \(minPixelCount) px)")
+        for cid in visibleClusterIDs.sorted() {
+            let bb = bboxes[cid]!
             let w = bb.maxX - bb.minX + 1
             let h = bb.maxY - bb.minY + 1
-            print("[CLIP-DEBUG]   Cluster \(cid): bbox=(\(bb.minX),\(bb.minY))-(\(bb.maxX),\(bb.maxY)) size=\(w)x\(h)")
+            let px = pixelCounts[cid] ?? 0
+            print("[CLIP-DEBUG]   Cluster \(cid): bbox=(\(bb.minX),\(bb.minY))-(\(bb.maxX),\(bb.maxY)) size=\(w)x\(h) pixels=\(px)")
         }
-        Self.log.info("Found \(bboxes.count) clusters, encoding...")
+        Self.log.info("Found \(visibleClusterIDs.count) visible clusters (\(discardedCount) too small), encoding...")
 
         // Status: found clusters
         DispatchQueue.main.async { [weak self] in
-            self?.onStatusUpdate?("Found \(bboxes.count) clusters, cropping…")
+            self?.onStatusUpdate?("Found \(visibleClusterIDs.count) visible clusters, cropping…")
         }
 
         var newIDs: [Int32] = []
         var newFeatures: [[Float]] = []
 
-        let sortedClusterIDs = bboxes.keys.sorted()
+        let sortedClusterIDs = visibleClusterIDs.sorted()
         let totalClusters = sortedClusterIDs.count
         encodingProgress = (0, totalClusters)
 
@@ -477,7 +486,9 @@ public class CLIPService {
 
             // Extract the crop from BGRA data → RGB CGImage
             guard let cropImage = extractCrop(rgbData: rgbData, width: width, height: height,
-                                               x: bb.minX, y: bb.minY, w: cropW, h: cropH) else {
+                                               x: bb.minX, y: bb.minY, w: cropW, h: cropH,
+                                               clusterData: useMaskedCrops ? clusterData : nil,
+                                               clusterID: cid) else {
                 print("[CLIP-DEBUG]   Failed to extract crop for cluster \(cid)")
                 encodingProgress = (index + 1, totalClusters)
                 DispatchQueue.main.async { [weak self] in
@@ -559,14 +570,32 @@ public class CLIPService {
     }
 
     /// Extract a bounding-box crop from BGRA pixel data and return as an RGB CGImage.
+    /// If `clusterData` is provided, pixels not belonging to `clusterID` are set to white (masked out).
     private func extractCrop(rgbData: [UInt8], width: Int, height: Int,
-                              x: Int, y: Int, w: Int, h: Int) -> CGImage? {
+                              x: Int, y: Int, w: Int, h: Int,
+                              clusterData: [Int32]? = nil, clusterID: Int32 = -1) -> CGImage? {
         // Use RGBA (4 bytes/pixel) — CGBitmapContext doesn't support 3-byte RGB
         var cropRGBA = [UInt8](repeating: 255, count: w * h * 4)
         for row in 0..<h {
             for col in 0..<w {
-                let srcIdx = ((y + row) * width + (x + col)) * 4
+                let srcX = x + col
+                let srcY = y + row
+                let srcIdx = (srcY * width + srcX) * 4
                 let dstIdx = (row * w + col) * 4
+
+                // If masking is enabled, check if this pixel belongs to the cluster
+                if let clusterData = clusterData {
+                    let pixelCluster = clusterData[srcY * width + srcX]
+                    if pixelCluster != clusterID {
+                        // Masked out → white background
+                        cropRGBA[dstIdx + 0] = 255
+                        cropRGBA[dstIdx + 1] = 255
+                        cropRGBA[dstIdx + 2] = 255
+                        cropRGBA[dstIdx + 3] = 255
+                        continue
+                    }
+                }
+
                 // BGRA → RGBX
                 cropRGBA[dstIdx + 0] = rgbData[srcIdx + 2] // R
                 cropRGBA[dstIdx + 1] = rgbData[srcIdx + 1] // G

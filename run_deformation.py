@@ -17,8 +17,8 @@ except ImportError:
     print("Could not import DeformNetwork from export_deform_weights.py")
     sys.exit(1)
 
-def run_deformation(ply_path, model_path, t, output_path):
-    print(f"Processing {ply_path} with model {model_path} at t={t}")
+def run_deformation(ply_path, model_path, t, output_path, smooth=False):
+    print(f"Processing {ply_path} with model {model_path} at t={t} (smooth={smooth})")
     
     # 1. Load PLY
     plydata = PlyData.read(ply_path)
@@ -48,11 +48,8 @@ def run_deformation(ply_path, model_path, t, output_path):
     r1 = np.array(vertex['rot_1'])
     r2 = np.array(vertex['rot_2'])
     r3 = np.array(vertex['rot_3'])
-    # Construct (x, y, z, w) to match Deform.metal assumption where rotX is x
-    # Metal: float4(rotX, rotY, rotZ, rotW) -> rot.x=X, rot.y=Y, rot.z=Z, rot.w=W
-    
-    #rotations = np.stack([r1, r2, r3, r0], axis=1).astype(np.float32)
-    rotations = np.stack([r0, r1, r2, r3], axis=1).astype(np.float32)
+    # Standard 3DGS rotation convention: (w, x, y, z) = (rot_0, rot_1, rot_2, rot_3)
+    rotations = np.stack([r0, r1, r2, r3], axis=1).astype(np.float32)  # (w,x,y,z)
 
     num_points = positions.shape[0]
     print(f"Loaded {num_points} points")
@@ -100,23 +97,26 @@ def run_deformation(ply_path, model_path, t, output_path):
     # Position: pos + d_xyz
     new_positions = positions + d_xyz
     
-    # Rotation: normalize(rot) + d_rot
-    # rot is (w, x, y, z)
-    # normalize
+    # Rotation: normalize(rot) then optionally add d_rot
     norms = np.linalg.norm(rotations, axis=1, keepdims=True)
     normalized_rot = rotations / norms
-    new_rotations = normalized_rot + d_rot
     
-    # Normalize new rotations to prevent artifacts
-    new_norms = np.linalg.norm(new_rotations, axis=1, keepdims=True)
-    # Avoid divide by zero
-    new_rotations = new_rotations / np.maximum(new_norms, 1e-9)
-    
-    # Scaling: log(exp(scale) + d_scale)
-    exp_scales = np.exp(scales) 
-    new_exp_scales = exp_scales + d_scale
-    # Handle potential negative values (if d_scale dominates)
-    new_scales = np.log(np.maximum(new_exp_scales, 1e-6))
+    if smooth:
+        # Smooth mode: skip rotation AND scale deltas, keep canonical values
+        # This avoids noisy rotation/scale outputs for dense recordings
+        print("Smooth mode: applying position deltas only")
+        new_rotations = normalized_rot
+        new_scales = scales  # keep original log-space scales
+    else:
+        # Full mode: apply rotation deltas
+        new_rotations = normalized_rot + d_rot
+        # Normalize result quaternion
+        new_norms = np.linalg.norm(new_rotations, axis=1, keepdims=True)
+        new_rotations = new_rotations / np.maximum(new_norms, 1e-9)
+        # Scale: log(exp(scale) + d_scale)
+        exp_scales = np.exp(scales)
+        new_exp_scales = exp_scales + d_scale
+        new_scales = np.log(np.maximum(new_exp_scales, 1e-6))
     
     # 5. Write Output
     print("Saving output...")
@@ -130,12 +130,12 @@ def run_deformation(ply_path, model_path, t, output_path):
     vertex_data['scale_1'] = new_scales[:, 1].astype(np.float32)
     vertex_data['scale_2'] = new_scales[:, 2].astype(np.float32)
     
-    # Remap back
-    # Output is (w,x,y,z)
-    vertex_data['rot_0'] = new_rotations[:, 0].astype(np.float32) # w
-    vertex_data['rot_1'] = new_rotations[:, 1].astype(np.float32) # x
-    vertex_data['rot_2'] = new_rotations[:, 2].astype(np.float32) # y
-    vertex_data['rot_3'] = new_rotations[:, 3].astype(np.float32) # z
+    # Remap output rotations back to PLY convention (rot_0=w, rot_1=x, rot_2=y, rot_3=z)
+    # Rotations are always in (w,x,y,z) order, matching PLY convention
+    vertex_data['rot_0'] = new_rotations[:, 0].astype(np.float32)  # w
+    vertex_data['rot_1'] = new_rotations[:, 1].astype(np.float32)  # x
+    vertex_data['rot_2'] = new_rotations[:, 2].astype(np.float32)  # y
+    vertex_data['rot_3'] = new_rotations[:, 3].astype(np.float32)  # z
     
     PlyData([PlyElement.describe(vertex_data, 'vertex')], text=False).write(output_path)
     print(f"Saved deformed PLY to {output_path}")
@@ -146,10 +146,13 @@ if __name__ == "__main__":
     parser.add_argument("model_path", help="Path to deform.pth")
     parser.add_argument("t", type=float, help="Time t (0 to 1)")
     parser.add_argument("output_path", help="Output PLY file")
+    parser.add_argument("--smooth", action="store_true", default=False,
+                        help="Smooth mode: apply only position deltas, skip rotation and scale deltas. "
+                             "Reduces noise for dense recordings.")
     
     args = parser.parse_args()
     
     if not 0.0 <= args.t <= 1.0:
         print("Warning: t should typically be between 0 and 1.")
         
-    run_deformation(args.ply_path, args.model_path, args.t, args.output_path)
+    run_deformation(args.ply_path, args.model_path, args.t, args.output_path, smooth=args.smooth)
