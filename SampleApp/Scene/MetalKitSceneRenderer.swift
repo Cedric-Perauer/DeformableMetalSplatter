@@ -66,6 +66,10 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var hasClusters: Bool {
         (modelRenderer as? SplatRenderer)?.hasClusters ?? false
     }
+    /// Returns true if CoreML models are available for semantic clustering
+    public var hasCLIPModels: Bool {
+        clipService.hasImageEncoder && clipService.hasTextEncoder
+    }
     // Coordinate system mode: 0=default, 1=rotate X -90°, 2=rotate X +90°, 3=no rotation
     public var coordinateMode: Int = 0
     // Total length of the video/animation in seconds

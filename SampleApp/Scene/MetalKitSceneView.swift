@@ -26,6 +26,7 @@ struct MetalKitSceneView: View {
     @State private var showControls: Bool = false  // Controls hidden by default on phone
     @State private var coordinateMode: Int = 0  // 0=default, 1=Z-up→Y-up, 2=flip, 3=none
     @State private var hasClusters: Bool = false  // Whether clusters.bin was loaded
+    @State private var hasCLIPModels: Bool = false  // Whether CoreML models are available
     
     // Multi-selection mode
     @State private var isSelectingMode: Bool = false  // Whether in multi-cluster selection mode
@@ -58,6 +59,7 @@ struct MetalKitSceneView: View {
                           selectedClusterID: $selectedClusterID,
                           coordinateMode: coordinateMode,
                           hasClusters: $hasClusters,
+                          hasCLIPModels: $hasCLIPModels,
                           useMaskedCrops: useMaskedCrops,
                           isSelectingMode: $isSelectingMode,
                           selectedClusterCount: $selectedClusterCount,
@@ -150,6 +152,17 @@ struct MetalKitSceneView: View {
                                     Image(systemName: "exclamationmark.triangle.fill")
                                         .foregroundStyle(.yellow)
                                     Text("clusters.bin not found")
+                                        .foregroundStyle(.white.opacity(0.8))
+                                }
+                                .font(.caption2)
+                            }
+
+                            // Warning when CoreML models are not available
+                            if !hasCLIPModels {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "exclamationmark.triangle.fill")
+                                        .foregroundStyle(.orange)
+                                    Text("CoreML models not found - semantic search unavailable")
                                         .foregroundStyle(.white.opacity(0.8))
                                 }
                                 .font(.caption2)
@@ -275,7 +288,7 @@ struct MetalKitSceneView: View {
                             }
                             .buttonStyle(.bordered)
                             .tint(hasClipFeatures ? .green : .blue)
-                            .disabled(isEncodingClusters || !hasClusters)
+                            .disabled(isEncodingClusters || !hasClusters || !hasCLIPModels)
                         }
                         .padding(8)
                         .background(.ultraThinMaterial)
@@ -289,17 +302,18 @@ struct MetalKitSceneView: View {
                                 TextField("Search clusters...", text: $queryText)
                                     .textFieldStyle(.plain)
                                     .foregroundStyle(.white)
+                                    .disabled(!hasCLIPModels)
                                     .onSubmit {
                                         searchRequest = true
                                     }
-                                
+
                                 Button("Search") {
                                     searchRequest = true
                                 }
                                 .buttonStyle(.bordered)
                                 .tint(.blue)
                                 .font(.caption)
-                                .disabled(queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                                .disabled(queryText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !hasCLIPModels)
                                 
                                 if !queryText.isEmpty {
                                     Button(action: {
@@ -419,6 +433,7 @@ private struct MetalView: ViewRepresentable {
     @Binding var selectedClusterID: Int32
     var coordinateMode: Int
     @Binding var hasClusters: Bool
+    @Binding var hasCLIPModels: Bool
     var useMaskedCrops: Bool
     @Binding var isSelectingMode: Bool
     @Binding var selectedClusterCount: Int
@@ -437,6 +452,7 @@ private struct MetalView: ViewRepresentable {
         var startCameraDistance: Float = 0.0
         var selectedClusterIDBinding: Binding<Int32>?
         var hasClustersBinding: Binding<Bool>?
+        var hasCLIPModelsBinding: Binding<Bool>?
         var isSelectingModeBinding: Binding<Bool>?
         var selectedClusterCountBinding: Binding<Int>?
         var isEncodingClustersBinding: Binding<Bool>?
@@ -590,6 +606,7 @@ private struct MetalView: ViewRepresentable {
         let coordinator = Coordinator()
         coordinator.selectedClusterIDBinding = $selectedClusterID
         coordinator.hasClustersBinding = $hasClusters
+        coordinator.hasCLIPModelsBinding = $hasCLIPModels
         coordinator.isSelectingModeBinding = $isSelectingMode
         coordinator.selectedClusterCountBinding = $selectedClusterCount
         coordinator.isEncodingClustersBinding = $isEncodingClusters
@@ -679,6 +696,7 @@ private struct MetalView: ViewRepresentable {
         context.coordinator.renderer?.manualTime = manualTime
         context.coordinator.selectedClusterIDBinding = $selectedClusterID
         context.coordinator.hasClustersBinding = $hasClusters
+        context.coordinator.hasCLIPModelsBinding = $hasCLIPModels
         context.coordinator.isSelectingModeBinding = $isSelectingMode
         context.coordinator.selectedClusterCountBinding = $selectedClusterCount
         context.coordinator.isEncodingClustersBinding = $isEncodingClusters
@@ -710,9 +728,11 @@ private struct MetalView: ViewRepresentable {
             }
             let hasClustersNow = renderer.hasClusters
             let hasFeaturesNow = renderer.clipService.hasFeatures
+            let hasCLIPModelsNow = renderer.hasCLIPModels
             DispatchQueue.main.async {
                 context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                 context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
+                context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
             }
             
             // Set up callback if needed
@@ -857,6 +877,7 @@ private struct MetalView: ViewRepresentable {
     func updateUIView(_ view: MTKView, context: Context) {
         context.coordinator.renderer?.manualTime = manualTime
         context.coordinator.hasClustersBinding = $hasClusters
+        context.coordinator.hasCLIPModelsBinding = $hasCLIPModels
         context.coordinator.isSelectingModeBinding = $isSelectingMode
         context.coordinator.selectedClusterCountBinding = $selectedClusterCount
         context.coordinator.isEncodingClustersBinding = $isEncodingClusters
@@ -888,9 +909,11 @@ private struct MetalView: ViewRepresentable {
             }
             let hasClustersNow = renderer.hasClusters
             let hasFeaturesNow = renderer.clipService.hasFeatures
+            let hasCLIPModelsNow = renderer.hasCLIPModels
             DispatchQueue.main.async {
                 context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                 context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
+                context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
             }
             
             // Set up callback if needed
@@ -929,6 +952,7 @@ private struct MetalView: ViewRepresentable {
                     try await renderer?.load(modelIdentifier)
                     // Update hasClusters after load completes
                     coordinator.hasClustersBinding?.wrappedValue = renderer?.hasClusters ?? false
+                    coordinator.hasCLIPModelsBinding?.wrappedValue = renderer?.hasCLIPModels ?? false
                 }
             } catch {
                 print("Error loading model: \(error.localizedDescription)")
@@ -944,6 +968,7 @@ private struct MetalView: ViewRepresentable {
                     try await renderer.load(modelIdentifier)
                     // Update hasClusters after load completes
                     coordinator.hasClustersBinding?.wrappedValue = renderer.hasClusters
+                    coordinator.hasCLIPModelsBinding?.wrappedValue = renderer.hasCLIPModels
                 }
             } catch {
                 print("Error loading model: \(error.localizedDescription)")
