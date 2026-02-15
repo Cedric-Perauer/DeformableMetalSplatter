@@ -292,7 +292,6 @@ public class SplatRenderer {
         self.splatBuffer = try MetalBuffer(device: device)
         self.splatBufferPrime = try MetalBuffer(device: device)
         self.sortedIndexBuffer = try MetalBuffer(device: device)
-//        self.canonicalSplatBufferPrime = try MetalBuffer(device: device)
         self.indexBuffer = try MetalBuffer(device: device)
         self.emptyClusterColorBuffer = device.makeBuffer(length: MemoryLayout<Float>.size * 3,
                                                          options: .storageModeShared)!
@@ -739,7 +738,7 @@ public class SplatRenderer {
 
         canonicalBuffer!.append(newPoints.points.map { CanonicalSplat($0) })
     }
-    public func loadDeformableScene(directory: URL) async throws {
+    public func loadDeformableScene(directory: URL, loadClusters: Bool = false) async throws {
         // When selecting a whole directory as input,
         // automatically consider as loading a dynamic scene.
         
@@ -809,88 +808,20 @@ public class SplatRenderer {
             cmd.commit()
             cmd.waitUntilCompleted()
         }
-        
+
+        if loadClusters {
+            let clustersURL = directory.appendingPathComponent("clusters.bin")
+            let count = canonicalBuffer?.count ?? 0
+            print("About to load clusters from: \(clustersURL)")
+            loadClustersBin(from: clustersURL, expectedCount: count)
+        }
 
         print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
     }
 
-
+    @available(*, deprecated, message: "Use loadDeformableScene(directory:loadClusters:) instead")
     public func loadDeformableSceneClusters(directory: URL) async throws {
-        // When selecting a whole directory as input,
-        // automatically consider as loading a dynamic scene.
-        
-        // Configure scene and deform mlp path
-        let plyURL = directory.appendingPathComponent("point_cloud.ply")
-        let weightsURL = directory.appendingPathComponent("weights.bin")
-        let clustersURL = directory.appendingPathComponent("clusters.bin")
-        
-        // Load the mlp weight
-        let weightsData = try Data(contentsOf: weightsURL)
-        
-        // Initialize the MPS deformation network
-        self.deformSystem = DeformGraphSystem(device: device, useFP16: useFP16Deformation)
-        self.deformSystem?.loadWeights(flatData: weightsData)
-        self.deformSystem?.buildAndCompile()
-        
-        // Init Kernels
-        let lib = self.library
-        
-        guard let extractFunc = lib.makeFunction(name: "extract_graph_inputs"),
-              let timeFillFunc = lib.makeFunction(name: "fill_time"),
-              let applyFunc = lib.makeFunction(name: "apply_graph_outputs") else {
-            print("Error: Could not find Deform.metal shader functions.")
-            return
-        }
-
-        self.extractPipeline = try await device.makeComputePipelineState(function: extractFunc)
-        self.timeFillPipeline = try await device.makeComputePipelineState(function: timeFillFunc)
-        self.applyPipeline = try await device.makeComputePipelineState(function: applyFunc)
-        
-        // Read canonical Gaussians using the original IO pipeline
-        try await readCanonical(from: plyURL)
-        try await read(from: plyURL)
-        
-        guard canonicalBuffer!.count == splatBuffer.count else {return}
-        // Allocate Buffers
-        let count = canonicalBuffer?.count ?? 0
-        
-        if count > 0 {
-            bufXYZ = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
-            bufT   = device.makeBuffer(length: count * 1 * 4, options: .storageModePrivate)
-            bufDXYZ = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
-            bufDRot = device.makeBuffer(length: count * 4 * 4, options: .storageModePrivate)
-            bufDScale = device.makeBuffer(length: count * 3 * 4, options: .storageModePrivate)
-        }
-        
-        if count > 0,
-           let extractPipe = extractPipeline,
-           let cBuffer = canonicalBuffer?.buffer,
-           let bXYZ = bufXYZ,
-           let bT = bufT,
-           let queue = device.makeCommandQueue(),
-           let cmd = queue.makeCommandBuffer(),
-           let enc = cmd.makeComputeCommandEncoder() {
-            enc.label = "Init: Extract XYZ"
-            enc.setComputePipelineState(extractPipe)
-            enc.setBuffer(cBuffer, offset: 0, index: 0)
-            enc.setBuffer(bXYZ, offset: 0, index: 1)
-            enc.setBuffer(bT, offset: 0, index: 2)
-            var t: Float = 0
-            enc.setBytes(&t, length: 4, index: 3)
-            
-            let w = extractPipe.threadExecutionWidth
-            enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
-                                threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
-            enc.endEncoding()
-            
-            cmd.commit()
-            cmd.waitUntilCompleted()
-        }
-        
-        print("About to load clusters from: \(clustersURL)")
-        loadClustersBin(from: clustersURL, expectedCount: count)
-        
-        print("Loaded Deformable Scene: \(canonicalBuffer!.count) points")
+        try await loadDeformableScene(directory: directory, loadClusters: true)
     }
 
     private func loadClustersBin(from url: URL, expectedCount: Int) {
@@ -1286,20 +1217,9 @@ public class SplatRenderer {
         
         let cameraWorldForward = cameraWorldForward
         let cameraWorldPosition = cameraWorldPosition
-        
-//        // For benchmark.
-//        guard splatCount > 0 else {
-//            sorting = false
-//            let elapsed: TimeInterval = 0
-//            print("Sort time (\(useGPU ? "GPU" : "CPU")): \(elapsed) seconds")
-//            onSortComplete?(elapsed)
-//            return
-//        }
 
         if useGPU {
             Task(priority: .high) {
-//                let startTime = Date()
-
                 // Allocate a GPU buffer for storing distances.
                 guard let distanceBuffer = device.makeBuffer(
                     length: MemoryLayout<Float>.size * splatCount,
@@ -1446,7 +1366,6 @@ extension SplatRenderer.CanonicalSplat {
         )
         
         self.scale = MTLPackedFloat3Make(scale.x, scale.y, scale.z)
-//        self.rotation = SIMD4<Float>(rotation.imag.x, rotation.imag.y, rotation.imag.z, rotation.real)
         self.rotationX = rotation.imag.x;
         self.rotationY = rotation.imag.y;
         self.rotationZ = rotation.imag.z;

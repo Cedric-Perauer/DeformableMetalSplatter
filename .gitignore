@@ -3,6 +3,7 @@ xcuserdata
 DerivedData/
 .swiftpm
 coreml_models/
+coreml_models copy/
 # Python
 __pycache__/
 *.pyc

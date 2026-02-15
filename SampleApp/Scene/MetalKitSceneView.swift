@@ -650,56 +650,6 @@ private struct MetalView: ViewRepresentable {
         }
     }
 
-    /// Shared logic to process a text query via the renderer
-    private func unused_processQuery(renderer: MetalKitSceneRenderer, coordinator: Coordinator) {
-        // Only run when searchRequest is true
-        guard searchRequest else { return }
-        
-        let text = queryText.trimmingCharacters(in: .whitespacesAndNewlines)
-        
-        guard !text.isEmpty else {
-            coordinator.queryStatusTextBinding?.wrappedValue = "Enter a search term first"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                coordinator.queryStatusTextBinding?.wrappedValue = ""
-            }
-            return
-        }
-        
-        guard renderer.clipService.hasFeatures else {
-            print("[CLIP-DEBUG] Search failed: no CLIP features available")
-            coordinator.queryStatusTextBinding?.wrappedValue = "⚠️ Encode clusters first before searching"
-            DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-                coordinator.queryStatusTextBinding?.wrappedValue = ""
-            }
-            return
-        }
-        
-        coordinator.queryStatusTextBinding?.wrappedValue = "Searching…"
-        
-        // Run query and select top-K clusters
-        let selectedIDs = renderer.queryText(text, topK: queryTopK)
-
-        // Use multi-selection to highlight the result
-        renderer.clearSelection()
-        for id in selectedIDs {
-            renderer.toggleClusterSelection(Int32(id))
-        }
-        // Put renderer in confirmed selection mode
-        renderer.selectionMode = 2
-
-        coordinator.selectedClusterCountBinding?.wrappedValue = selectedIDs.count
-        coordinator.isSelectingModeBinding?.wrappedValue = false
-        
-        if selectedIDs.isEmpty {
-            coordinator.queryStatusTextBinding?.wrappedValue = "No matching clusters found"
-        } else {
-            coordinator.queryStatusTextBinding?.wrappedValue = "Found \(selectedIDs.count) cluster(s)"
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) {
-            coordinator.queryStatusTextBinding?.wrappedValue = ""
-        }
-    }
-
 #if os(macOS)
     func makeNSView(context: Context) -> MTKView {
         // Use a custom subclass to capture mouse events
