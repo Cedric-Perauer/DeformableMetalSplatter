@@ -38,7 +38,7 @@ struct MetalKitSceneView: View {
     @State private var isEncodingClusters: Bool = false
     @State private var hasClipFeatures: Bool = false
     @State private var encodingProgressText: String = ""  // e.g. "3 / 15"
-    @State private var useMaskedCrops: Bool = false  // Mask non-cluster pixels in crops
+    @State private var useMaskedCrops: Bool = true  // Mask non-cluster pixels in crops
     @State private var averageMaskedAndUnmasked: Bool = false  // Run both modes and average
 
     // CLIP text query

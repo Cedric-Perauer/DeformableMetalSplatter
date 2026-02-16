@@ -40,7 +40,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
 
-    public var useMaskedCrops: Bool = false
+    public var useMaskedCrops: Bool = true
     public var averageMaskedAndUnmasked: Bool = false  // Run both modes and average features
 
     // Multi-selection
