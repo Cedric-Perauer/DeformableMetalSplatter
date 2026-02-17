@@ -57,36 +57,54 @@ kernel void fill_time(
 // NOTE: CanonicalSplat.scale is in LINEAR space (asLinearFloat already applied exp() to the
 // PLY log-space scale values). The deformation network's d_scale is also a linear-space delta.
 // compute_cov() expects linear-space scale for building the S diagonal matrix.
+//
+// deformMask: if provided (buffer(5)), only apply deformation where mask > 0.5.
+// For t=0, pass an all-ones mask to deform all splats.
 kernel void apply_graph_outputs(
     device const CanonicalSplat* inSplats [[ buffer(0) ]],
     device const float* dXYZ              [[ buffer(1) ]],
     device const float* dRot              [[ buffer(2) ]],
     device const float* dScale            [[ buffer(3) ]],
     device Splat* outSplats               [[ buffer(4) ]],
+    device const float* deformMask         [[ buffer(5) ]],
     uint id [[ thread_position_in_grid ]]
 ) {
     CanonicalSplat input = inSplats[id];
-    
-    float3 d_xyz = float3(dXYZ[id*3+0], dXYZ[id*3+1], dXYZ[id*3+2]);
-    float3 new_pos = input.position + d_xyz;
-    
-    // Rotation: canonical is stored as (x, y, z, w)
-    // Swizzle network rotation output (w,x,y,z) → (x,y,z,w) and add
-    float4 rot = float4(input.rotationX, input.rotationY, input.rotationZ, input.rotationW);
-    float4 d_rotation_raw = float4(dRot[id*4+0], dRot[id*4+1], dRot[id*4+2], dRot[id*4+3]);
-    float4 d_rotation = d_rotation_raw.yzwx;
-    float4 new_rot = normalize(rot) + d_rotation;
-    new_rot = normalize(new_rot);
-    
-    // Scale: input.scale is already linear; d_scale is a linear-space delta
-    float3 d_scaling = float3(dScale[id*3+0], dScale[id*3+1], dScale[id*3+2]);
-    float3 new_scale = input.scale + d_scaling;
-    
-    Splat out;
-    out.position = packed_float3(new_pos);
-    out.color = input.color;
-    compute_cov(new_rot, new_scale, out.covA, out.covB);
-    
-    outSplats[id] = out;
+
+    // Check mask: only apply deformation if mask > 0.5
+    float maskValue = deformMask[id];
+    bool shouldDeform = maskValue > 0.5;
+
+    if (shouldDeform) {
+        float3 d_xyz = float3(dXYZ[id*3+0], dXYZ[id*3+1], dXYZ[id*3+2]);
+        float3 new_pos = input.position + d_xyz;
+
+        // Rotation: canonical is stored as (x, y, z, w)
+        // Swizzle network rotation output (w,x,y,z) → (x,y,z,w) and add
+        float4 rot = float4(input.rotationX, input.rotationY, input.rotationZ, input.rotationW);
+        float4 d_rotation_raw = float4(dRot[id*4+0], dRot[id*4+1], dRot[id*4+2], dRot[id*4+3]);
+        float4 d_rotation = d_rotation_raw.yzwx;
+        float4 new_rot = normalize(rot) + d_rotation;
+        new_rot = normalize(new_rot);
+
+        // Scale: input.scale is already linear; d_scale is a linear-space delta
+        float3 d_scaling = float3(dScale[id*3+0], dScale[id*3+1], dScale[id*3+2]);
+        float3 new_scale = input.scale + d_scaling;
+
+        Splat out;
+        out.position = packed_float3(new_pos);
+        out.color = input.color;
+        compute_cov(new_rot, new_scale, out.covA, out.covB);
+
+        outSplats[id] = out;
+    } else {
+        // Keep canonical splat (no deformation)
+        float4 rot = float4(input.rotationX, input.rotationY, input.rotationZ, input.rotationW);
+        Splat out;
+        out.position = input.position;
+        out.color = input.color;
+        compute_cov(rot, input.scale, out.covA, out.covB);
+        outSplats[id] = out;
+    }
 }
 

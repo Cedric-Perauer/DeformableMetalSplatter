@@ -37,11 +37,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     var panY: Float = 0.0
     public var manualTime: Float? = nil
     public var showClusterColors: Bool = false
+    public var showMask: Bool = false  // Show dynamic vs static splats
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
 
     public var useMaskedCrops: Bool = true
     public var averageMaskedAndUnmasked: Bool = false  // Run both modes and average features
+    public var useMaskedDeformation: Bool = false  // Use mask.bin for deformation (t > 0)
 
     // Multi-selection
     public var selectionMode: UInt32 = 0
@@ -66,6 +68,14 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     /// Returns true if cluster data is available for this scene
     public var hasClusters: Bool {
         (modelRenderer as? SplatRenderer)?.hasClusters ?? false
+    }
+    /// Returns true if mask data is available for this scene
+    public var hasMask: Bool {
+        (modelRenderer as? SplatRenderer)?.hasMask ?? false
+    }
+    /// Returns the current deformation FPS (0 if no deformation)
+    public var deformFPS: Double {
+        (modelRenderer as? SplatRenderer)?.currentDeformFPS ?? 0.0
     }
     /// Returns true if CoreML models are available for semantic clustering
     public var hasCLIPModels: Bool {
@@ -244,9 +254,11 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         
         if let splatRenderer = modelRenderer as? SplatRenderer {
             splatRenderer.useClusterColors = showClusterColors
+            splatRenderer.showMask = showMask
             splatRenderer.selectedClusterID = selectedClusterID
             splatRenderer.useDepthVisualization = showDepthVisualization
             splatRenderer.selectionMode = selectionMode
+            splatRenderer.useMaskedDeformation = useMaskedDeformation
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
         }
 
