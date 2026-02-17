@@ -1,18 +1,32 @@
 .DS_Store
+.build/
 xcuserdata
 DerivedData/
 .swiftpm
-
+# CoreML models - tracked via Git LFS
+# (but cache/hub files are still ignored)
+coreml_models/
+coreml_models copy/
 # Python
 __pycache__/
 *.pyc
 
+ml-mobileclip/
 # Large assets / binaries (tracked via Git LFS when needed)
 *.ply
 *.pth
 *.pt
 *.bin
 *.mlmodel
-*.mlpackage/
+# CoreML models should be downloaded by users
 example_data/
 
+
+# Generated outputs
+cluster_crops/
+cluster_features.npz
+output.png
+result.png
+result_coreml.png
+
+# HuggingFace model hub files (already ignored above)
