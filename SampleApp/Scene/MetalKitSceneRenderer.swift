@@ -40,6 +40,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var showMask: Bool = false  // Show dynamic vs static splats
     public var selectedClusterID: Int32 = -1  // -1 means show all
     public var showDepthVisualization: Bool = false
+    public var renderFPS: Double = 0.0  // Rendering FPS for display
 
     public var useMaskedCrops: Bool = true
     public var averageMaskedAndUnmasked: Bool = false  // Run both modes and average features
@@ -361,6 +362,7 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
         let elapsed = now - fpsLastTimestamp
         guard elapsed >= 1.0 else { return }
         let fps = Double(fpsFrameCount) / elapsed
+        renderFPS = fps
         Self.log.debug("MTKView draw FPS: \(fps)")
         fpsFrameCount = 0
         fpsLastTimestamp = now

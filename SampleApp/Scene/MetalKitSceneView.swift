@@ -53,6 +53,7 @@ struct MetalKitSceneView: View {
     // Deformation settings
     @State private var useMaskedDeformation: Bool = false  // Use mask.bin for deformation
     @State private var deformFPS: Double = 0.0  // Deformation FPS from renderer
+    @State private var renderFPS: Double = 0.0  // Rendering FPS from renderer
     
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
     
@@ -84,7 +85,8 @@ struct MetalKitSceneView: View {
                           queryStatusText: $queryStatusText,
                           queryTopK: $queryTopK,
                           useMaskedDeformation: useMaskedDeformation,
-                          deformFPS: $deformFPS)
+                          deformFPS: $deformFPS,
+                          renderFPS: $renderFPS)
                 .ignoresSafeArea()
                 .onChange(of: hasClusters) { _, newValue in
                     // Auto-disable cluster colors if clusters become unavailable
@@ -93,10 +95,17 @@ struct MetalKitSceneView: View {
                     }
                 }
                 
-                // FPS overlay in top right corner (only shown when deformation is running and t > 0)
-                if time > 0.01 {
-                    VStack(alignment: .trailing, spacing: 2) {
-                        Text(String(format: "Def: %.1f FPS", deformFPS))
+                // FPS overlay in top right corner
+                VStack(alignment: .trailing, spacing: 2) {
+                    Text(String(format: "Render: %.0f FPS", renderFPS))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.6))
+                        .cornerRadius(4)
+                    if time > 0.01 {
+                        Text(String(format: "Deform: %.1f FPS", deformFPS))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
@@ -104,10 +113,10 @@ struct MetalKitSceneView: View {
                             .background(Color.black.opacity(0.6))
                             .cornerRadius(4)
                     }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                    .padding(.top, 60)
-                    .padding(.trailing, 16)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                .padding(.top, 60)
+                .padding(.trailing, 16)
                 
                 // UI Overlay
                 VStack(spacing: 8) {
@@ -498,6 +507,7 @@ struct MetalKitSceneView: View {
         @Binding var queryTopK: Int
         var useMaskedDeformation: Bool
         @Binding var deformFPS: Double
+        @Binding var renderFPS: Double
         
         class Coordinator: NSObject {
             var renderer: MetalKitSceneRenderer?
@@ -516,6 +526,7 @@ struct MetalKitSceneView: View {
             var queryStatusTextBinding: Binding<String>?
             var queryTopKBinding: Binding<Int>?
             var deformFPSBinding: Binding<Double>?
+            var renderFPSBinding: Binding<Double>?
             /// Tracks last query text to avoid redundant queries
             var lastQueryText: String = ""
             /// Cached CLIP features to survive renderer/view lifecycle resets
@@ -672,6 +683,7 @@ struct MetalKitSceneView: View {
             coordinator.queryStatusTextBinding = $queryStatusText
             coordinator.queryTopKBinding = $queryTopK
             coordinator.deformFPSBinding = $deformFPS
+            coordinator.renderFPSBinding = $renderFPS
             return coordinator
         }
         
@@ -792,12 +804,14 @@ struct MetalKitSceneView: View {
                 let hasFeaturesNow = renderer.clipService.hasFeatures
                 let hasCLIPModelsNow = renderer.hasCLIPModels
                 let deformFPSNow = renderer.deformFPS
+                let renderFPSNow = renderer.renderFPS
                 DispatchQueue.main.async {
                     context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                     context.coordinator.hasMaskBinding?.wrappedValue = hasMaskNow
                     context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
                     context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
                     context.coordinator.deformFPSBinding?.wrappedValue = deformFPSNow
+                    context.coordinator.renderFPSBinding?.wrappedValue = renderFPSNow
                 }
                 
                 // Set up callback if needed
@@ -982,12 +996,14 @@ struct MetalKitSceneView: View {
                 let hasFeaturesNow = renderer.clipService.hasFeatures
                 let hasCLIPModelsNow = renderer.hasCLIPModels
                 let deformFPSNow = renderer.deformFPS
+                let renderFPSNow = renderer.renderFPS
                 DispatchQueue.main.async {
                     context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                     context.coordinator.hasMaskBinding?.wrappedValue = hasMaskNow
                     context.coordinator.hasClipFeaturesBinding?.wrappedValue = hasFeaturesNow
                     context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
                     context.coordinator.deformFPSBinding?.wrappedValue = deformFPSNow
+                    context.coordinator.renderFPSBinding?.wrappedValue = renderFPSNow
                 }
                 
                 // Set up callback if needed
