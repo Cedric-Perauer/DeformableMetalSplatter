@@ -1054,16 +1054,10 @@ public class SplatRenderer {
         Self.log.debug("Deform graph: \(graphElapsedMs) ms")
 
         // Apply deformation to canonical Gaussians
-        // For t=0: use all-ones mask to deform all splats
-        // For t>0: use loaded mask to only deform masked splats (if useMaskedDeformation is true)
-        let maskBuffer: MTLBuffer?
-        if time < 0.001 {
-            maskBuffer = allOnesMaskBuffer
-        } else if useMaskedDeformation && deformMaskBuffer != nil {
-            maskBuffer = deformMaskBuffer
-        } else {
-            maskBuffer = allOnesMaskBuffer
-        }
+        // The shader always applies deltas unconditionally. When runMasked is used,
+        // static splats retain their t=0 deltas in the buffer, so they keep their
+        // t=0 appearance automatically. We just pass any valid mask buffer.
+        let maskBuffer: MTLBuffer? = allOnesMaskBuffer
 
         if let enc = commandBuffer.makeComputeCommandEncoder(),
            let bMask = maskBuffer {
