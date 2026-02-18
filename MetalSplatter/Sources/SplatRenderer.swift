@@ -180,10 +180,8 @@ public class SplatRenderer {
     private let emptyClusterColorBuffer: MTLBuffer
     private let emptyClusterIdBuffer: MTLBuffer
     private var lastDeformationTime: Float = -1.0
-    // Deformation FPS tracking
+    // Deformation FPS tracking (based on actual graph runtime)
     private var deformFPS: Double = 0.0
-    private var deformFrameCount: Int = 0
-    private var deformLastTimestamp: CFAbsoluteTime = 0
     
     // Picking support (screen-space based)
     private var maxClusterID: UInt32 = 0
@@ -1027,12 +1025,12 @@ public class SplatRenderer {
         // Calculate d_xyz, d_rotation, d_scaling
         // For t=0: run on all splats
         // For t>0 with masked deformation: only run on masked splats
-        let graphStart = CFAbsoluteTimeGetCurrent()
         let useMasked = useMaskedDeformation && time > 0.001 && deformMaskBuffer != nil
 
+        let graphElapsedMs: Double
         if useMasked {
             // Run only on masked splats for better performance
-            sys.runMasked(commandQueue: commandQueue,
+            graphElapsedMs = sys.runMasked(commandQueue: commandQueue,
                           xyzBuffer: bXYZ,
                           tBuffer: bT,
                           outXYZ: bDXYZ,
@@ -1042,7 +1040,7 @@ public class SplatRenderer {
                           count: count)
         } else {
             // Run on all splats
-            sys.run(commandQueue: commandQueue,
+            graphElapsedMs = sys.run(commandQueue: commandQueue,
                     xyzBuffer: bXYZ,
                     tBuffer: bT,
                     outXYZ: bDXYZ,
@@ -1050,8 +1048,6 @@ public class SplatRenderer {
                     outScale: bDScale,
                     count: count)
         }
-        let graphElapsedMs = (CFAbsoluteTimeGetCurrent() - graphStart) * 1000.0
-        Self.log.debug("Deform graph: \(graphElapsedMs) ms")
 
         // Apply deformation to canonical Gaussians
         // The shader always applies deltas unconditionally. When runMasked is used,
@@ -1070,27 +1066,16 @@ public class SplatRenderer {
             enc.setBuffer(splatBuffer.buffer, offset: 0, index: 4)
             enc.setBuffer(bMask, offset: 0, index: 5)
 
-
             let w = applyPipe.threadExecutionWidth
-            let applyStart = CFAbsoluteTimeGetCurrent()
             enc.dispatchThreads(MTLSize(width: count, height: 1, depth: 1),
                                 threadsPerThreadgroup: MTLSize(width: w, height: 1, depth: 1))
             enc.endEncoding()
-            let applyElapsedMs = (CFAbsoluteTimeGetCurrent() - applyStart) * 1000.0
-            Self.log.debug("Deform apply encode: \(applyElapsedMs) ms")
         }
 
-        // Update deformation FPS
-        deformFrameCount += 1
-        let now = CFAbsoluteTimeGetCurrent()
-        if deformLastTimestamp == 0 {
-            deformLastTimestamp = now
-        }
-        let elapsed = now - deformLastTimestamp
-        if elapsed >= 1.0 {
-            deformFPS = Double(deformFrameCount) / elapsed
-            deformFrameCount = 0
-            deformLastTimestamp = now
+        // Update deformation FPS from actual graph runtime (FPS = 1 / (ms/1000))
+        if graphElapsedMs > 0.01 {
+            deformFPS = 1.0 / (graphElapsedMs / 1000.0)
+            print("Deform FPS: \(deformFPS) (from \(graphElapsedMs) ms)")
         }
     }
 

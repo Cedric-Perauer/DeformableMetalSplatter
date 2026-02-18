@@ -103,6 +103,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var onEncodingComplete: (() -> Void)?
     /// Callback invoked on main thread with status text during encoding
     public var onStatusUpdate: ((String) -> Void)?
+    /// Callback invoked with deformation FPS each frame
+    public var onDeformFPSUpdate: ((Double) -> Void)?
 
     init?(_ metalKitView: MTKView) {
         self.device = metalKitView.device!
@@ -261,6 +263,12 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             splatRenderer.selectionMode = selectionMode
             splatRenderer.useMaskedDeformation = useMaskedDeformation
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
+            
+            // Push deformation FPS to UI every frame
+            let fps = splatRenderer.currentDeformFPS
+            DispatchQueue.main.async { [weak self] in
+                self?.onDeformFPSUpdate?(fps)
+            }
         }
 
         // Rendering Step

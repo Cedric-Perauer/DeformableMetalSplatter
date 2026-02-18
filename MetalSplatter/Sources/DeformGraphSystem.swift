@@ -188,15 +188,17 @@ public class DeformGraphSystem {
         return MPSGraphTensorData(ndArray)
     }
     
+    /// Returns elapsed time in milliseconds
+    @discardableResult
     public func run(commandQueue: MTLCommandQueue,
                     xyzBuffer: MTLBuffer,
                     tBuffer: MTLBuffer,
                     outXYZ: MTLBuffer,
                     outRot: MTLBuffer,
                     outScale: MTLBuffer,
-                    count: Int) {
+                    count: Int) -> Double {
         
-        guard let exec = executable else { return }
+        guard let exec = executable else { return 0 }
         let totalStart = CFAbsoluteTimeGetCurrent()
         let floatSize = MemoryLayout<Float>.size
         let numBatches = (count + SAFE_BATCH_SIZE - 1) / SAFE_BATCH_SIZE
@@ -277,6 +279,7 @@ public class DeformGraphSystem {
 
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
         print("DeformGraph total (\(numBatches) batches): \(totalElapsedMs) ms")
+        return totalElapsedMs
     }
 
     /// Run deformation network only on a subset of indices (for masked deformation)
@@ -289,6 +292,8 @@ public class DeformGraphSystem {
     ///   - outScale: Output scale deltas (full buffer)
     ///   - maskBuffer: Mask buffer (1.0 = deform, 0.0 = skip)
     ///   - count: Total number of splats
+    /// Returns elapsed time in milliseconds
+    @discardableResult
     public func runMasked(commandQueue: MTLCommandQueue,
                           xyzBuffer: MTLBuffer,
                           tBuffer: MTLBuffer,
@@ -296,9 +301,9 @@ public class DeformGraphSystem {
                           outRot: MTLBuffer,
                           outScale: MTLBuffer,
                           maskBuffer: MTLBuffer,
-                          count: Int) {
+                          count: Int) -> Double {
 
-        guard let exec = executable else { return }
+        guard let exec = executable else { return 0 }
 
         // First, count how many masked splats we have and gather their indices
         let maskData = maskBuffer.contents().assumingMemoryBound(to: Float.self)
@@ -314,7 +319,7 @@ public class DeformGraphSystem {
         let maskedCount = maskedIndices.count
         guard maskedCount > 0 else {
             print("DeformGraph: No masked splats to deform")
-            return
+            return 0
         }
 
         print("DeformGraph: Running masked deformation on \(maskedCount)/\(count) splats")
@@ -418,6 +423,7 @@ public class DeformGraphSystem {
 
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
         print("DeformGraph masked total (\(numBatches) batches): \(totalElapsedMs) ms")
+        return totalElapsedMs
     }
 
     func positionalEncoding(input: MPSGraphTensor, numFreqs: Int, dataType: MPSDataType) -> MPSGraphTensor {

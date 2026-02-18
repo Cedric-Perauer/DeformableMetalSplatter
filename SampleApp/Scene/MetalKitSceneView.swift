@@ -95,17 +95,10 @@ struct MetalKitSceneView: View {
                     }
                 }
                 
-                // FPS overlay in top right corner
-                VStack(alignment: .trailing, spacing: 2) {
-                    Text(String(format: "Render: %.0f FPS", renderFPS))
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(Color.black.opacity(0.6))
-                        .cornerRadius(4)
-                    if time > 0.01 {
-                        Text(String(format: "Deform: %.1f FPS", deformFPS))
+                // Deformation FPS overlay in top right corner (only when deforming)
+                if !isManualTime || time > 0.01 {
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(String(format: "Deformation: %.1f FPS", deformFPS))
                             .font(.system(.caption, design: .monospaced))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 8)
@@ -113,10 +106,10 @@ struct MetalKitSceneView: View {
                             .background(Color.black.opacity(0.6))
                             .cornerRadius(4)
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                    .padding(.top, 60)
+                    .padding(.trailing, 16)
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
-                .padding(.top, 60)
-                .padding(.trailing, 16)
                 
                 // UI Overlay
                 VStack(spacing: 8) {
@@ -732,6 +725,11 @@ struct MetalKitSceneView: View {
             renderer.clipService.onStatusUpdate = { statusText in
                 print("[CLIP-DEBUG] clipService onStatusUpdate: \(statusText)")
                 coordinator.encodingProgressTextBinding?.wrappedValue = statusText
+            }
+            
+            // Deformation FPS updates (pushed every frame from draw loop)
+            renderer.onDeformFPSUpdate = { fps in
+                coordinator.deformFPSBinding?.wrappedValue = fps
             }
         }
         
