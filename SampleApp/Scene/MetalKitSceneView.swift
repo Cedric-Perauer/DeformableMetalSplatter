@@ -135,7 +135,7 @@ struct MetalKitSceneView: View {
                             .font(.caption)
                         
                         // Masked deformation toggle
-                        Toggle("Mask Def", isOn: $useMaskedDeformation)
+                        Toggle("Mask Static", isOn: $useMaskedDeformation)
                             .toggleStyle(.button)
                             .font(.caption)
                             .tint(.orange)
@@ -197,7 +197,7 @@ struct MetalKitSceneView: View {
                                     .font(.caption)
                                     .disabled(!hasClusters)
 
-                                    Toggle("Show Mask", isOn: Binding(
+                                    Toggle("Show Dynamic Splats", isOn: Binding(
                                         get: { showMask },
                                         set: { newValue in
                                             showMask = newValue
