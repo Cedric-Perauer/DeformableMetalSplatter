@@ -110,6 +110,8 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var onStatusUpdate: ((String) -> Void)?
     /// Callback invoked with deformation FPS each frame
     public var onDeformFPSUpdate: ((Double) -> Void)?
+    /// Callback invoked with deformed/total splat counts each frame
+    public var onDeformedSplatCountUpdate: ((Int, Int) -> Void)?
 
     init?(_ metalKitView: MTKView) {
         self.device = metalKitView.device!
@@ -270,10 +272,13 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
             splatRenderer.maskThreshold = maskThreshold
             splatRenderer.update(time: timeToPass, commandBuffer: commandBuffer)
             
-            // Push deformation FPS to UI every frame
+            // Push deformation FPS and splat counts to UI every frame
             let fps = splatRenderer.currentDeformFPS
+            let deformedCount = splatRenderer.deformedSplatCount
+            let totalCount = splatRenderer.totalSplatCount
             DispatchQueue.main.async { [weak self] in
                 self?.onDeformFPSUpdate?(fps)
+                self?.onDeformedSplatCountUpdate?(deformedCount, totalCount)
             }
         }
 

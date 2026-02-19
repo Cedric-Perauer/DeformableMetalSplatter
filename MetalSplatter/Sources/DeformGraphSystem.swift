@@ -30,6 +30,7 @@ public class DeformGraphSystem {
     // 131072 should work on most devices; reduce if GPU crashes
     let SAFE_BATCH_SIZE = 16384
     var flatten = true
+    public private(set) var lastMaskedCount: Int = 0
     public init(device: MTLDevice, useFP16: Bool) {
         self.device = device
         self.mpsDevice = MPSGraphDevice(mtlDevice: device)
@@ -318,6 +319,7 @@ public class DeformGraphSystem {
         }
 
         let maskedCount = maskedIndices.count
+        lastMaskedCount = maskedCount
         guard maskedCount > 0 else {
             print("DeformGraph: No masked splats to deform")
             return 0

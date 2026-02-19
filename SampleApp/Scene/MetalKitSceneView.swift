@@ -52,9 +52,11 @@ struct MetalKitSceneView: View {
     
     // Deformation settings
     @State private var useMaskedDeformation: Bool = false  // Use mask.bin for deformation
-    @State private var maskThresholdPercent: Double = 50.0  // 0-100% slider value
+    @State private var maskThreshold: Double = 0.1  // Absolute threshold 0-1
     @State private var deformFPS: Double = 0.0  // Deformation FPS from renderer
     @State private var renderFPS: Double = 0.0  // Rendering FPS from renderer
+    @State private var deformedSplatCount: Int = 0
+    @State private var totalSplatCount: Int = 0
     
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
     
@@ -86,9 +88,11 @@ struct MetalKitSceneView: View {
                           queryStatusText: $queryStatusText,
                           queryTopK: $queryTopK,
                           useMaskedDeformation: useMaskedDeformation,
-                          maskThresholdPercent: maskThresholdPercent,
+                          maskThreshold: maskThreshold,
                           deformFPS: $deformFPS,
-                          renderFPS: $renderFPS)
+                          renderFPS: $renderFPS,
+                          deformedSplatCount: $deformedSplatCount,
+                          totalSplatCount: $totalSplatCount)
                 .ignoresSafeArea()
                 .onChange(of: hasClusters) { _, newValue in
                     // Auto-disable cluster colors if clusters become unavailable
@@ -107,6 +111,15 @@ struct MetalKitSceneView: View {
                             .padding(.vertical, 4)
                             .background(Color.black.opacity(0.6))
                             .cornerRadius(4)
+                        if totalSplatCount > 0 {
+                            Text("\(deformedSplatCount) / \(totalSplatCount) splats")
+                                .font(.system(.caption, design: .monospaced))
+                                .foregroundStyle(.white.opacity(0.8))
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 2)
+                                .background(Color.black.opacity(0.6))
+                                .cornerRadius(4)
+                        }
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                     .padding(.top, 60)
@@ -128,11 +141,11 @@ struct MetalKitSceneView: View {
                             .tint(.orange)
 
                         if useMaskedDeformation {
-                            Text(String(format: "%.0f%%", maskThresholdPercent))
+                            Text(String(format: "%.2f", maskThreshold))
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(.orange)
                                 .frame(width: 36, alignment: .trailing)
-                            Slider(value: $maskThresholdPercent, in: 0...100)
+                            Slider(value: $maskThreshold, in: 0...1)
                                 .accentColor(.orange)
                                 .frame(maxWidth: 120)
                         }
@@ -511,9 +524,11 @@ struct MetalKitSceneView: View {
         @Binding var queryStatusText: String
         @Binding var queryTopK: Int
         var useMaskedDeformation: Bool
-        var maskThresholdPercent: Double
+        var maskThreshold: Double
         @Binding var deformFPS: Double
         @Binding var renderFPS: Double
+        @Binding var deformedSplatCount: Int
+        @Binding var totalSplatCount: Int
         
         class Coordinator: NSObject {
             var renderer: MetalKitSceneRenderer?
@@ -533,6 +548,8 @@ struct MetalKitSceneView: View {
             var queryTopKBinding: Binding<Int>?
             var deformFPSBinding: Binding<Double>?
             var renderFPSBinding: Binding<Double>?
+            var deformedSplatCountBinding: Binding<Int>?
+            var totalSplatCountBinding: Binding<Int>?
             /// Tracks last query text to avoid redundant queries
             var lastQueryText: String = ""
             /// Cached CLIP features to survive renderer/view lifecycle resets
@@ -690,6 +707,8 @@ struct MetalKitSceneView: View {
             coordinator.queryTopKBinding = $queryTopK
             coordinator.deformFPSBinding = $deformFPS
             coordinator.renderFPSBinding = $renderFPS
+            coordinator.deformedSplatCountBinding = $deformedSplatCount
+            coordinator.totalSplatCountBinding = $totalSplatCount
             return coordinator
         }
         
@@ -743,6 +762,10 @@ struct MetalKitSceneView: View {
             // Deformation FPS updates (pushed every frame from draw loop)
             renderer.onDeformFPSUpdate = { fps in
                 coordinator.deformFPSBinding?.wrappedValue = fps
+            }
+            renderer.onDeformedSplatCountUpdate = { deformed, total in
+                coordinator.deformedSplatCountBinding?.wrappedValue = deformed
+                coordinator.totalSplatCountBinding?.wrappedValue = total
             }
         }
         
@@ -800,11 +823,7 @@ struct MetalKitSceneView: View {
             context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
             context.coordinator.renderer?.averageMaskedAndUnmasked = averageMaskedAndUnmasked
             context.coordinator.renderer?.useMaskedDeformation = useMaskedDeformation
-            // Convert percentage to absolute threshold using max mask value from renderer
-            if let renderer = context.coordinator.renderer {
-                let absThreshold = Float(maskThresholdPercent / 100.0) * renderer.maxMaskValue
-                renderer.maskThreshold = absThreshold
-            }
+            context.coordinator.renderer?.maskThreshold = Float(maskThreshold)
 
             // Pass selection mode to renderer
             let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)
@@ -997,10 +1016,7 @@ struct MetalKitSceneView: View {
             context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
             context.coordinator.renderer?.averageMaskedAndUnmasked = averageMaskedAndUnmasked
             context.coordinator.renderer?.useMaskedDeformation = useMaskedDeformation
-            if let renderer = context.coordinator.renderer {
-                let absThreshold = Float(maskThresholdPercent / 100.0) * renderer.maxMaskValue
-                renderer.maskThreshold = absThreshold
-            }
+            context.coordinator.renderer?.maskThreshold = Float(maskThreshold)
 
             // Pass selection mode to renderer
             let uiMode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)

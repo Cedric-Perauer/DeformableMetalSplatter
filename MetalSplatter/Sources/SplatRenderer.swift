@@ -187,6 +187,7 @@ public class SplatRenderer {
     private var lastDeformationTime: Float = -1.0
     // Deformation FPS tracking (based on actual graph runtime)
     private var deformFPS: Double = 0.0
+    private var _deformedSplatCount: Int = 0
     
     // Picking support (screen-space based)
     private var maxClusterID: UInt32 = 0
@@ -1088,11 +1089,28 @@ public class SplatRenderer {
             deformFPS = 1.0 / (graphElapsedMs / 1000.0)
             print("Deform FPS: \(deformFPS) (from \(graphElapsedMs) ms)")
         }
+
+        // Track how many splats were deformed this frame
+        if useMasked {
+            _deformedSplatCount = sys.lastMaskedCount
+        } else {
+            _deformedSplatCount = count
+        }
     }
 
     /// Returns the current deformation FPS, or 0 if no deformation is running
     public var currentDeformFPS: Double {
         return deformFPS
+    }
+
+    /// Returns the number of splats deformed in the last frame
+    public var deformedSplatCount: Int {
+        return _deformedSplatCount
+    }
+
+    /// Returns the total splat count
+    public var totalSplatCount: Int {
+        return splatBuffer.count
     }
 
     private static func cameraWorldForward(forViewMatrix view: simd_float4x4) -> simd_float3 {
