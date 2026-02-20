@@ -109,6 +109,11 @@ struct MetalKitSceneView: View {
                         maskThreshold = newPercentage
                     }
                 }
+                .onChange(of: hasMask) { _, newValue in
+                    if !newValue && useMaskedDeformation {
+                        useMaskedDeformation = false
+                    }
+                }
                 
                 // Deformation FPS overlay in top right corner (only when deforming)
                 if !isManualTime || time > 0.01 {
@@ -148,6 +153,17 @@ struct MetalKitSceneView: View {
                             .toggleStyle(.button)
                             .font(.caption)
                             .tint(.orange)
+                            .disabled(!hasMask)
+                            .help(hasMask ? "Only deform moving splats" : "No mask available for this scene")
+                            
+                        if !hasMask {
+                            HStack(spacing: 4) {
+                                Image(systemName: "exclamationmark.triangle.fill")
+                                Text("No mask.bin")
+                            }
+                            .font(.caption)
+                            .foregroundColor(.yellow)
+                        }
 
                         if useMaskedDeformation {
                             Text(String(format: "%.0f%%", maskThreshold))
