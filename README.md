@@ -12,9 +12,8 @@ Render deformable 3D Gaussian Splats using Metal on Apple platforms. Tested on :
 Please follow the steps in original [README](./README_Orig.md) to setup the project in xcode. 
 
 # TODOS
-- [ ] add optional speedup via static vs dynamic splat masking (export_static_mask.py ready, Swift integration pending)
 - [ ] Update BibTex after 3DV proceedings are published
-- [ ] ...
+- [ ] consider other improvements ...
 
 # Usage
 By selecting a folder in the startup page, the app loads the ```weights.bin```, ```clusters.bin``` and ```point_cloud.ply``` inside the directory. You can download example scenes from [here](https://drive.google.com/drive/folders/1WNnabmOoLe5aX9xD_rgFajjIEYVGgpVJ?usp=sharing) trained with [TRASE](https://github.com/yunjinli/TRASE). 
