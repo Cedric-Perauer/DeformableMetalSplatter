@@ -122,7 +122,7 @@ Modifications and new features are licensed under MIT License (Copyright © 2026
 
 # References
 
-If you find this useful for your own work, particularly the 3D segmentation please consider taking a look at TRASE's [code](https://github.com/yunjinli/TRASE), [paper](https://arxiv.org/pdf/2411.19290), and [website](https://yunjinli.github.io/project-sadg/). Give us a star if you find it interesting :)
+If you find this useful for your own work, particularly the 3D segmentation please consider taking a look at TRASE's [code](https://github.com/yunjinli/TRASE), [paper](https://arxiv.org/pdf/2411.19290), and [website](https://yunjinli.github.io/project-sadg/). Give us a star if you find it interesting :) Also feel free to open an issue or contribute to our project if you have an idea for a useful feature or developed on yourself :) 
 
 ```
 @article{li2024trase,
