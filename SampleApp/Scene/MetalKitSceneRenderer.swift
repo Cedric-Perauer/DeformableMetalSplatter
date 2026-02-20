@@ -83,6 +83,29 @@ class MetalKitSceneRenderer: NSObject, MTKViewDelegate {
     public var maxMaskValue: Float {
         (modelRenderer as? SplatRenderer)?.maxMaskValue ?? 1.0
     }
+    
+    /// Returns the recommended mask percentage (0-100) from the python generation script, if available
+    public var recommendedMaskPercentage: Double? {
+        (modelRenderer as? SplatRenderer)?.recommendedMaskPercentage
+    }
+    
+    /// Saves the current mask percentage to mask.json
+    public func saveRecommendedMaskPercentage(_ percentage: Double) {
+        (modelRenderer as? SplatRenderer)?.saveRecommendedMaskPercentage(percentage)
+    }
+    
+    /// Converts a percentage (0-100) to an absolute mask threshold using percentiles if available
+    public func getMaskThreshold(forPercentage percentage: Double) -> Float {
+        guard let splatRenderer = modelRenderer as? SplatRenderer,
+              !splatRenderer.sortedMaskValues.isEmpty else {
+            return Float(percentage / 100.0) * maxMaskValue
+        }
+        let sorted = splatRenderer.sortedMaskValues
+        let clamped = max(0.0, min(100.0, percentage))
+        let targetIndex = Int((clamped / 100.0) * Double(sorted.count - 1))
+        return sorted[max(0, min(targetIndex, sorted.count - 1))]
+    }
+    
     /// Returns true if CoreML models are available for semantic clustering
     public var hasCLIPModels: Bool {
         clipService.hasImageEncoder && clipService.hasTextEncoder

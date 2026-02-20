@@ -182,6 +182,12 @@ public class SplatRenderer {
     public var maskThreshold: Float = 0.0
     /// Maximum mask value in the loaded mask.bin (for UI slider scaling)
     public var maxMaskValue: Float = 1.0
+    /// Sorted mask values for percentile scaling
+    public var sortedMaskValues: [Float] = []
+    /// Recommended percentile offset derived from configuration script
+    public var recommendedMaskPercentage: Double? = nil
+    /// URL where the recommended mask percentage should be saved
+    public var maskJsonURL: URL? = nil
     private let emptyClusterColorBuffer: MTLBuffer
     private let emptyClusterIdBuffer: MTLBuffer
     private var lastDeformationTime: Float = -1.0
@@ -988,10 +994,43 @@ public class SplatRenderer {
 
         deformMaskBuffer = device.makeBuffer(bytes: maskValues, length: expectedBytes, options: .storageModeShared)
         
-        // Compute max mask value for UI slider scaling
-        self.maxMaskValue = maskValues.max() ?? 1.0
+        // Compute percentiles for slider mapping
+        self.sortedMaskValues = maskValues.sorted()
+        
+        // Max value for fallback
+        self.maxMaskValue = self.sortedMaskValues.last ?? 1.0
         if self.maxMaskValue < 1e-8 { self.maxMaskValue = 1.0 }
+        
+        // Read recommended value if available
+        let jsonURL = url.deletingPathExtension().appendingPathExtension("json")
+        self.maskJsonURL = jsonURL
+        if let data = try? Data(contentsOf: jsonURL),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let percentage = obj["recommended_percentile"] as? Double {
+            self.recommendedMaskPercentage = percentage
+            Self.log.info("Loaded custom mask recommendation: \(percentage)%")
+        } else {
+            self.recommendedMaskPercentage = nil
+        }
+        
         Self.log.info("Loaded deform mask (\(expectedCount) entries, max=\(self.maxMaskValue)).")
+    }
+
+    /// Saves a new recommended mask percentage to mask.json
+    public func saveRecommendedMaskPercentage(_ percentage: Double) {
+        guard let url = maskJsonURL else {
+            Self.log.error("Failed to save mask recommendation: no mask.json URL available.")
+            return
+        }
+        let dict: [String: Any] = ["recommended_percentile": percentage]
+        do {
+            let data = try JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)
+            try data.write(to: url)
+            self.recommendedMaskPercentage = percentage
+            Self.log.info("Saved custom mask recommendation: \(percentage)% to \(url.path)")
+        } catch {
+            Self.log.error("Failed to save mask recommendation: \(error.localizedDescription)")
+        }
     }
 
     public func update(time: Float, commandBuffer: MTLCommandBuffer) {

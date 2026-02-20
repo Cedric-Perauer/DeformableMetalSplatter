@@ -52,7 +52,9 @@ struct MetalKitSceneView: View {
     
     // Deformation settings
     @State private var useMaskedDeformation: Bool = false  // Use mask.bin for deformation
-    @State private var maskThreshold: Double = 0.1  // Absolute threshold 0-1
+    @State private var maskThreshold: Double = 50.0  // Percentage 0-100
+    @State private var recommendedMaskPercentage: Double? = nil // From generator script
+    @State private var saveMaskRequest: Bool = false
     @State private var deformFPS: Double = 0.0  // Deformation FPS from renderer
     @State private var renderFPS: Double = 0.0  // Rendering FPS from renderer
     @State private var deformedSplatCount: Int = 0
@@ -92,12 +94,19 @@ struct MetalKitSceneView: View {
                           deformFPS: $deformFPS,
                           renderFPS: $renderFPS,
                           deformedSplatCount: $deformedSplatCount,
-                          totalSplatCount: $totalSplatCount)
+                          totalSplatCount: $totalSplatCount,
+                          saveMaskRequest: $saveMaskRequest,
+                          recommendedMaskPercentage: $recommendedMaskPercentage)
                 .ignoresSafeArea()
                 .onChange(of: hasClusters) { _, newValue in
                     // Auto-disable cluster colors if clusters become unavailable
                     if !newValue && showClusterColors {
                         showClusterColors = false
+                    }
+                }
+                .onChange(of: recommendedMaskPercentage) { _, newValue in
+                    if let newPercentage = newValue {
+                        maskThreshold = newPercentage
                     }
                 }
                 
@@ -141,13 +150,21 @@ struct MetalKitSceneView: View {
                             .tint(.orange)
 
                         if useMaskedDeformation {
-                            Text(String(format: "%.2f", maskThreshold))
+                            Text(String(format: "%.0f%%", maskThreshold))
                                 .font(.system(.caption, design: .monospaced))
                                 .foregroundStyle(.orange)
-                                .frame(width: 36, alignment: .trailing)
-                            Slider(value: $maskThreshold, in: 0...1)
+                                .frame(width: 44, alignment: .trailing)
+                            Slider(value: $maskThreshold, in: 0...100)
                                 .accentColor(.orange)
                                 .frame(maxWidth: 120)
+                            Button(action: {
+                                saveMaskRequest = true
+                            }) {
+                                Image(systemName: "square.and.arrow.down")
+                            }
+                            .buttonStyle(.plain)
+                            .foregroundStyle(.orange)
+                            .help("Save current threshold to mask.json")
                         }
 
                         if isManualTime {
@@ -529,6 +546,8 @@ struct MetalKitSceneView: View {
         @Binding var renderFPS: Double
         @Binding var deformedSplatCount: Int
         @Binding var totalSplatCount: Int
+        @Binding var saveMaskRequest: Bool
+        @Binding var recommendedMaskPercentage: Double?
         
         class Coordinator: NSObject {
             var renderer: MetalKitSceneRenderer?
@@ -550,6 +569,7 @@ struct MetalKitSceneView: View {
             var renderFPSBinding: Binding<Double>?
             var deformedSplatCountBinding: Binding<Int>?
             var totalSplatCountBinding: Binding<Int>?
+            var recommendedMaskPercentageBinding: Binding<Double?>?
             /// Tracks last query text to avoid redundant queries
             var lastQueryText: String = ""
             /// Cached CLIP features to survive renderer/view lifecycle resets
@@ -709,6 +729,7 @@ struct MetalKitSceneView: View {
             coordinator.renderFPSBinding = $renderFPS
             coordinator.deformedSplatCountBinding = $deformedSplatCount
             coordinator.totalSplatCountBinding = $totalSplatCount
+            coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
             return coordinator
         }
         
@@ -807,6 +828,7 @@ struct MetalKitSceneView: View {
             context.coordinator.encodingProgressTextBinding = $encodingProgressText
             context.coordinator.searchRequestBinding = $searchRequest
             context.coordinator.queryStatusTextBinding = $queryStatusText
+            context.coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
             
             if let showClusterColors {
                 context.coordinator.renderer?.showClusterColors = showClusterColors
@@ -823,7 +845,10 @@ struct MetalKitSceneView: View {
             context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
             context.coordinator.renderer?.averageMaskedAndUnmasked = averageMaskedAndUnmasked
             context.coordinator.renderer?.useMaskedDeformation = useMaskedDeformation
-            context.coordinator.renderer?.maskThreshold = Float(maskThreshold)
+            
+            if let threshold = context.coordinator.renderer?.getMaskThreshold(forPercentage: maskThreshold) {
+                context.coordinator.renderer?.maskThreshold = threshold
+            }
 
             // Pass selection mode to renderer
             let mode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)
@@ -840,6 +865,7 @@ struct MetalKitSceneView: View {
                 let hasCLIPModelsNow = renderer.hasCLIPModels
                 let deformFPSNow = renderer.deformFPS
                 let renderFPSNow = renderer.renderFPS
+                let recommendedNow = renderer.recommendedMaskPercentage
                 DispatchQueue.main.async {
                     context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                     context.coordinator.hasMaskBinding?.wrappedValue = hasMaskNow
@@ -847,6 +873,7 @@ struct MetalKitSceneView: View {
                     context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
                     context.coordinator.deformFPSBinding?.wrappedValue = deformFPSNow
                     context.coordinator.renderFPSBinding?.wrappedValue = renderFPSNow
+                    context.coordinator.recommendedMaskPercentageBinding?.wrappedValue = recommendedNow
                 }
                 
                 // Set up callback if needed
@@ -870,6 +897,13 @@ struct MetalKitSceneView: View {
                 DispatchQueue.main.async {
                     coordinator.processQuery()
                     coordinator.searchRequestBinding?.wrappedValue = false
+                }
+            }
+            
+            if saveMaskRequest {
+                context.coordinator.renderer?.saveRecommendedMaskPercentage(maskThreshold)
+                DispatchQueue.main.async {
+                    self.saveMaskRequest = false
                 }
             }
             
@@ -1000,6 +1034,7 @@ struct MetalKitSceneView: View {
             context.coordinator.encodingProgressTextBinding = $encodingProgressText
             context.coordinator.searchRequestBinding = $searchRequest
             context.coordinator.queryStatusTextBinding = $queryStatusText
+            context.coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
             
             if let showClusterColors {
                 context.coordinator.renderer?.showClusterColors = showClusterColors
@@ -1016,7 +1051,10 @@ struct MetalKitSceneView: View {
             context.coordinator.renderer?.useMaskedCrops = useMaskedCrops
             context.coordinator.renderer?.averageMaskedAndUnmasked = averageMaskedAndUnmasked
             context.coordinator.renderer?.useMaskedDeformation = useMaskedDeformation
-            context.coordinator.renderer?.maskThreshold = Float(maskThreshold)
+            
+            if let threshold = context.coordinator.renderer?.getMaskThreshold(forPercentage: maskThreshold) {
+                context.coordinator.renderer?.maskThreshold = threshold
+            }
 
             // Pass selection mode to renderer
             let uiMode: UInt32 = isSelectingMode ? 1 : (selectedClusterCount > 0 ? (deleteSelected ? 3 : 2) : 0)
@@ -1033,6 +1071,7 @@ struct MetalKitSceneView: View {
                 let hasCLIPModelsNow = renderer.hasCLIPModels
                 let deformFPSNow = renderer.deformFPS
                 let renderFPSNow = renderer.renderFPS
+                let recommendedNow = renderer.recommendedMaskPercentage
                 DispatchQueue.main.async {
                     context.coordinator.hasClustersBinding?.wrappedValue = hasClustersNow
                     context.coordinator.hasMaskBinding?.wrappedValue = hasMaskNow
@@ -1040,6 +1079,7 @@ struct MetalKitSceneView: View {
                     context.coordinator.hasCLIPModelsBinding?.wrappedValue = hasCLIPModelsNow
                     context.coordinator.deformFPSBinding?.wrappedValue = deformFPSNow
                     context.coordinator.renderFPSBinding?.wrappedValue = renderFPSNow
+                    context.coordinator.recommendedMaskPercentageBinding?.wrappedValue = recommendedNow
                 }
                 
                 // Set up callback if needed
@@ -1062,6 +1102,13 @@ struct MetalKitSceneView: View {
                 DispatchQueue.main.async {
                     coordinator.processQuery()
                     coordinator.searchRequestBinding?.wrappedValue = false
+                }
+            }
+            
+            if saveMaskRequest {
+                context.coordinator.renderer?.saveRecommendedMaskPercentage(maskThreshold)
+                DispatchQueue.main.async {
+                    self.saveMaskRequest = false
                 }
             }
             

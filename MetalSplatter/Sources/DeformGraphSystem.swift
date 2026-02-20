@@ -204,6 +204,9 @@ public class DeformGraphSystem {
         let floatSize = MemoryLayout<Float>.size
         let numBatches = (count + SAFE_BATCH_SIZE - 1) / SAFE_BATCH_SIZE
 
+        let cb = MPSCommandBuffer(from: commandQueue)
+        cb.label = "DeformGraphSystem.run"
+
         for i in stride(from: 0, to: count, by: SAFE_BATCH_SIZE) {
             autoreleasepool {
                 let batchStart = CFAbsoluteTimeGetCurrent()
@@ -265,18 +268,21 @@ public class DeformGraphSystem {
                 resultsArray.append(outScaleData)
                 
                 if inputsArray.count == (exec.feedTensors?.count ?? 0) {
-                    let _ = exec.run(with: commandQueue,
-                                     inputs: inputsArray,
-                                     results: resultsArray,
-                                     executionDescriptor: nil)
+                    exec.encode(to: cb,
+                                inputs: inputsArray,
+                                results: resultsArray,
+                                executionDescriptor: nil)
                 }
                 
                 let batchElapsedMs = (CFAbsoluteTimeGetCurrent() - batchStart) * 1000.0
                 if numBatches > 1 {
-                    print("DeformGraph batch \(i / SAFE_BATCH_SIZE): \(batchElapsedMs) ms")
+                    print("DeformGraph batch \(i / SAFE_BATCH_SIZE) encoded: \(batchElapsedMs) ms")
                 }
             }
         }
+
+        cb.commit()
+        cb.waitUntilCompleted()
 
         let totalElapsedMs = (CFAbsoluteTimeGetCurrent() - totalStart) * 1000.0
         print("DeformGraph total (\(numBatches) batches): \(totalElapsedMs) ms")
@@ -359,6 +365,9 @@ public class DeformGraphSystem {
         let totalStart = CFAbsoluteTimeGetCurrent()
         let numBatches = (maskedCount + SAFE_BATCH_SIZE - 1) / SAFE_BATCH_SIZE
 
+        let cb = MPSCommandBuffer(from: commandQueue)
+        cb.label = "DeformGraphSystem.runMasked"
+
         for batchStartIdx in stride(from: 0, to: maskedCount, by: SAFE_BATCH_SIZE) {
             autoreleasepool {
                 let currentCount = min(SAFE_BATCH_SIZE, maskedCount - batchStartIdx)
@@ -393,13 +402,16 @@ public class DeformGraphSystem {
                 resultsArray.append(outScaleData)
 
                 if inputsArray.count == (exec.feedTensors?.count ?? 0) {
-                    let _ = exec.run(with: commandQueue,
-                                     inputs: inputsArray,
-                                     results: resultsArray,
-                                     executionDescriptor: nil)
+                    exec.encode(to: cb,
+                                inputs: inputsArray,
+                                results: resultsArray,
+                                executionDescriptor: nil)
                 }
             }
         }
+
+        cb.commit()
+        cb.waitUntilCompleted()
 
         // Copy results back to full output buffers at correct positions using memcpy
         let outXYZBase = outXYZ.contents()

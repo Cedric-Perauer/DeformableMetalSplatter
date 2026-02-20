@@ -18,6 +18,7 @@ import argparse
 import sys
 import os
 import struct
+import json
 
 from plyfile import PlyData
 # Import DeformNetwork from local file
@@ -215,6 +216,18 @@ def generate_deformation_mask(ply_path, model_path, output_path, threshold=0.001
                 f.write(f"P{pct}: {val:.6f} ({count_above}/{num_points} above = {100*count_above/num_points:.2f}%)\n")
     print(f"Saved summary to {summary_path}")
 
+    # Calculate recommended percentile and save config
+    static_count = np.sum(mask <= threshold)
+    recommended_percentile = float((static_count / num_points) * 100.0)
+    
+    config_path = output_path.replace('.bin', '.json')
+    if config_path == output_path:
+        config_path += '.json'
+    
+    with open(config_path, 'w') as f:
+        json.dump({"recommended_percentile": recommended_percentile}, f, indent=4)
+    print(f"Saved config to {config_path} (recommended_percentile: {recommended_percentile:.1f}%)")
+
     return mask
 
 
@@ -368,6 +381,18 @@ def generate_cluster_based_mask(ply_path, model_path, clusters_path, output_path
         f.write(f"Moving clusters: {moving_clusters} ({100*moving_clusters/num_clusters:.2f}%)\n")
         f.write(f"Static clusters: {num_clusters - moving_clusters} ({100*(num_clusters-moving_clusters)/num_clusters:.2f}%)\n")
     print(f"Saved summary to {summary_path}")
+
+    # Calculate recommended percentile and save config
+    static_count = np.sum(mask <= threshold)
+    recommended_percentile = float((static_count / num_points) * 100.0)
+    
+    config_path = output_path.replace('.bin', '.json')
+    if config_path == output_path:
+        config_path += '.json'
+    
+    with open(config_path, 'w') as f:
+        json.dump({"recommended_percentile": recommended_percentile}, f, indent=4)
+    print(f"Saved config to {config_path} (recommended_percentile: {recommended_percentile:.1f}%)")
 
     return mask
 
