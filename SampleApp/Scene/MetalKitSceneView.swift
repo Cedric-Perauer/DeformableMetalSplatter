@@ -578,8 +578,10 @@ struct MetalKitSceneView: View {
         
         class Coordinator: NSObject {
             var renderer: MetalKitSceneRenderer?
+            weak var metalKitView: MTKView?
             var startCameraDistance: Float = 0.0
-            
+            var previousTouchCount: Int = 0
+
 #if os(iOS)
             lazy var motionManager: CMMotionManager = {
                 let manager = CMMotionManager()
@@ -711,23 +713,36 @@ struct MetalKitSceneView: View {
             
             @objc func handlePan(_ gesture: UIPanGestureRecognizer) {
                 guard let renderer = renderer else { return }
-                
+
+                let currentTouchCount = gesture.numberOfTouches
+
+                if gesture.state == .began {
+                    previousTouchCount = currentTouchCount
+                }
+
+                // When touch count changes mid-gesture, reset translation to avoid jumps
+                if currentTouchCount != previousTouchCount {
+                    gesture.setTranslation(.zero, in: gesture.view)
+                    previousTouchCount = currentTouchCount
+                    return
+                }
+
                 let translation = gesture.translation(in: gesture.view)
-                
+
                 // Check how many fingers are touching the screen
-                if gesture.numberOfTouches == 1 {
+                if currentTouchCount == 1 {
                     // One finger: Orbit
                     let sensitivity: Float = 0.01
                     renderer.yaw += Float(translation.x) * sensitivity
                     renderer.pitch += Float(translation.y) * sensitivity
-                    
-                } else if gesture.numberOfTouches == 2 {
+
+                } else if currentTouchCount == 2 {
                     // Two fingers: XY pan
                     let panSensitivity: Float = 0.005
                     renderer.panX += Float(translation.x) * panSensitivity
                     renderer.panY -= Float(translation.y) * panSensitivity
                 }
-                
+
                 // Reset translation so we get incremental updates
                 gesture.setTranslation(.zero, in: gesture.view)
             }
@@ -1098,8 +1113,9 @@ struct MetalKitSceneView: View {
                 return metalKitView
             }
             context.coordinator.renderer = renderer
+            context.coordinator.metalKitView = metalKitView
             metalKitView.delegate = renderer
-            
+
             // Add Gesture Recognizers
             let tapGesture = UITapGestureRecognizer(target: context.coordinator,
                                                     action: #selector(Coordinator.handleTap(_:)))
@@ -1229,16 +1245,37 @@ struct MetalKitSceneView: View {
                             // currentAttitude is a copy so that multiply by inverse does not mutate the motion property itself
                             let currentAttitude = motion.attitude.copy() as! CMAttitude
                             currentAttitude.multiply(byInverseOf: initial)
-                            
-                            // Map attitude to small display rotation delta (Pitch inverted depending on use case)
-                            let pitch = Float(currentAttitude.pitch) * 0.8
-                            let roll = Float(currentAttitude.roll) * 0.8
-                            let yaw = Float(currentAttitude.yaw) * 0.8
-                            
-                            // We might need to adjust mapping depending on physical orientation
-                            renderer.devicePitch = -pitch 
-                            renderer.deviceYaw = roll
-                            renderer.deviceRoll = -yaw
+
+                            let rawPitch = Float(currentAttitude.pitch) * 0.8
+                            let rawRoll = Float(currentAttitude.roll) * 0.8
+                            let rawYaw = Float(currentAttitude.yaw) * 0.8
+
+                            // Remap device axes to screen axes based on interface orientation
+                            // In landscape, device pitch/roll swap relative to what the user sees
+                            let scene = context.coordinator.metalKitView?.window?.windowScene
+                            let orientation = scene?.interfaceOrientation ?? .portrait
+
+                            switch orientation {
+                            case .landscapeLeft:
+                                // Device rotated 90° CCW: device-X points screen-down
+                                renderer.devicePitch = -rawRoll
+                                renderer.deviceYaw = rawPitch
+                                renderer.deviceRoll = -rawYaw
+                            case .landscapeRight:
+                                // Device rotated 90° CW: device-X points screen-up
+                                renderer.devicePitch = rawRoll
+                                renderer.deviceYaw = -rawPitch
+                                renderer.deviceRoll = -rawYaw
+                            case .portraitUpsideDown:
+                                renderer.devicePitch = rawPitch
+                                renderer.deviceYaw = -rawRoll
+                                renderer.deviceRoll = -rawYaw
+                            default:
+                                // Portrait
+                                renderer.devicePitch = -rawPitch
+                                renderer.deviceYaw = rawRoll
+                                renderer.deviceRoll = -rawYaw
+                            }
                         }
                     }
                 }
