@@ -27,6 +27,8 @@ You're right, the documentation is entirely missing; it's a major TODO list item
 
 * [OverSoul](https://apps.apple.com/app/id6475262918) for Vision Pro: "Capture, share, and interact with spatial photos, 3D models and immersive spaces in a vibrant social ecosystem designed for the next generation of spatial computing"
 
+* [Deformable Metal Splatter](https://github.com/yunjinli/DeformableMetalSplatter) is a demo app for dynamic 3DGS based on this library. It also implements an optional instance aware region selection based on clicking and MobileCLIP text prompting. 
+
 * Know of another project using MetalSplatter? Let us know!
 
 ## Resources
