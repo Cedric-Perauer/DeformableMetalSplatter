@@ -13,10 +13,7 @@ private typealias ViewRepresentable = NSViewRepresentable
 private typealias ViewRepresentable = UIViewRepresentable
 
 extension Notification.Name {
-    static let eyeTrackingBlinkSelect = Notification.Name("eyeTrackingBlinkSelect")
-    static let handTrackingSelect = Notification.Name("handTrackingSelect")
-    static let handTrackingExplode = Notification.Name("handTrackingExplode")
-    static let handTrackingEdgeRotate = Notification.Name("handTrackingEdgeRotate")
+    static let headTrackingRotate = Notification.Name("headTrackingRotate")
 }
 #endif
 
@@ -72,13 +69,10 @@ struct MetalKitSceneView: View {
     @State private var totalSplatCount: Int = 0
     @State private var useDeviceRotation: Bool = false
 
-    // Eye / head tracking
+    // Head tracking (rotates scene via front-camera face pose)
     #if os(iOS)
     @StateObject private var eyeTrackingService = EyeTrackingService()
     @State private var eyeTrackingEnabled: Bool = false
-    // Hand tracking
-    @StateObject private var handTrackingService = HandTrackingService()
-    @State private var handTrackingEnabled: Bool = false
     #endif
 
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
@@ -97,10 +91,23 @@ struct MetalKitSceneView: View {
                 .disabled(!hasMask)
                 .help(hasMask ? "Only deform moving splats" : "No mask available for this scene")
 
+            #if os(iOS)
+            Toggle("Fake Depth", isOn: Binding(
+                get: { useDeviceRotation },
+                set: { newValue in
+                    useDeviceRotation = newValue
+                    if newValue { eyeTrackingEnabled = false }
+                }
+            ))
+                .toggleStyle(.button)
+                .font(.caption)
+                .tint(.blue)
+            #else
             Toggle("Fake Depth", isOn: $useDeviceRotation)
                 .toggleStyle(.button)
                 .font(.caption)
                 .tint(.blue)
+            #endif
 
             #if os(iOS)
             if EyeTrackingService.isSupported {
@@ -108,13 +115,12 @@ struct MetalKitSceneView: View {
                     get: { eyeTrackingEnabled },
                     set: { newValue in
                         eyeTrackingEnabled = newValue
-                        if newValue { handTrackingEnabled = false }
+                        if newValue { useDeviceRotation = false }
                     }
                 ))
                     .toggleStyle(.button)
                     .font(.caption)
                     .tint(.purple)
-                    .disabled(!hasClusters)
                 if eyeTrackingEnabled {
                     Button("Re-center") {
                         eyeTrackingService.recenter()
@@ -124,17 +130,6 @@ struct MetalKitSceneView: View {
                     .tint(.purple)
                 }
             }
-            Toggle("Hand Mode", isOn: Binding(
-                get: { handTrackingEnabled },
-                set: { newValue in
-                    handTrackingEnabled = newValue
-                    if newValue { eyeTrackingEnabled = false }
-                }
-            ))
-                .toggleStyle(.button)
-                .font(.caption)
-                .tint(.mint)
-                .disabled(!hasClusters)
             #endif
 
             if !hasMask {
@@ -525,24 +520,6 @@ struct MetalKitSceneView: View {
         }
     }
 
-    #if os(iOS)
-    @ViewBuilder
-    private func trackingCursorView(x: CGFloat, y: CGFloat, isActive: Bool, color: Color) -> some View {
-        Circle()
-            .fill(isActive ? Color.red.opacity(0.8) : color.opacity(0.6))
-            .frame(width: 24, height: 24)
-            .overlay(
-                Circle()
-                    .stroke(Color.white, lineWidth: 2)
-            )
-            .shadow(color: .black.opacity(0.5), radius: 4)
-            .position(x: x, y: y)
-            .allowsHitTesting(false)
-            .animation(.easeOut(duration: 0.05), value: x)
-            .animation(.easeOut(duration: 0.05), value: y)
-    }
-    #endif
-
     private func metalViewLayer() -> some View {
         MetalView(modelIdentifier: modelIdentifier,
                   manualTime: isManualTime ? time : nil,
@@ -633,104 +610,28 @@ struct MetalKitSceneView: View {
                 encodingStatusOverlay
 
                 // Head tracking cursor overlay
-                #if os(iOS)
-                if eyeTrackingEnabled && eyeTrackingService.isRunning {
-                    trackingCursorView(
-                        x: eyeTrackingService.gazePoint.x * geometry.size.width,
-                        y: eyeTrackingService.gazePoint.y * geometry.size.height,
-                        isActive: eyeTrackingService.isBlinking,
-                        color: .purple
-                    )
-                }
-                // Hand tracking cursor overlay
-                if handTrackingEnabled && handTrackingService.isRunning && handTrackingService.handDetected {
-                    trackingCursorView(
-                        x: handTrackingService.cursorPoint.x * geometry.size.width,
-                        y: handTrackingService.cursorPoint.y * geometry.size.height,
-                        isActive: handTrackingService.isPinching,
-                        color: .mint
-                    )
-                    // Open palm indicator
-                    if handTrackingService.isOpenPalm {
-                        Image(systemName: "hand.raised.fill")
-                            .font(.system(size: 36))
-                            .foregroundStyle(.red.opacity(0.8))
-                            .position(
-                                x: handTrackingService.cursorPoint.x * geometry.size.width,
-                                y: handTrackingService.cursorPoint.y * geometry.size.height - 30
-                            )
-                            .allowsHitTesting(false)
-                    }
-                }
-                #endif
             }
             #if os(iOS)
             .onChange(of: eyeTrackingEnabled) { _, enabled in
                 if enabled {
-                    if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-                        eyeTrackingService.interfaceOrientation = scene.interfaceOrientation
-                    }
                     eyeTrackingService.start()
-                    if !isSelectingMode && selectedClusterCount == 0 {
-                        isSelectingMode = true
-                        selectedClusterID = -1
-                    }
                 } else {
                     eyeTrackingService.stop()
+                    NotificationCenter.default.post(
+                        name: .headTrackingRotate,
+                        object: nil,
+                        userInfo: ["headYaw": Float(0), "headPitch": Float(0)]
+                    )
                 }
             }
-            .onChange(of: eyeTrackingService.didBlink) { _, blinked in
-                guard blinked, eyeTrackingEnabled, isSelectingMode else { return }
+            .onReceive(eyeTrackingService.$headYaw) { _ in
+                guard eyeTrackingEnabled else { return }
                 NotificationCenter.default.post(
-                    name: .eyeTrackingBlinkSelect,
+                    name: .headTrackingRotate,
                     object: nil,
                     userInfo: [
-                        "gazeX": eyeTrackingService.gazePoint.x,
-                        "gazeY": eyeTrackingService.gazePoint.y
-                    ]
-                )
-            }
-            .onChange(of: handTrackingEnabled) { _, enabled in
-                if enabled {
-                    handTrackingService.start()
-                    if !isSelectingMode && selectedClusterCount == 0 {
-                        isSelectingMode = true
-                        selectedClusterID = -1
-                    }
-                } else {
-                    handTrackingService.stop()
-                }
-            }
-            .onChange(of: handTrackingService.didDoublePinch) { _, pinched in
-                guard pinched, handTrackingEnabled, isSelectingMode else { return }
-                NotificationCenter.default.post(
-                    name: .handTrackingSelect,
-                    object: nil,
-                    userInfo: [
-                        "cursorX": handTrackingService.cursorPoint.x,
-                        "cursorY": handTrackingService.cursorPoint.y
-                    ]
-                )
-            }
-            .onChange(of: handTrackingService.didOpenPalm) { _, opened in
-                guard opened, handTrackingEnabled else { return }
-                NotificationCenter.default.post(
-                    name: .handTrackingExplode,
-                    object: nil,
-                    userInfo: [
-                        "cursorX": handTrackingService.cursorPoint.x,
-                        "cursorY": handTrackingService.cursorPoint.y
-                    ]
-                )
-            }
-            .onReceive(handTrackingService.$edgeRotation) { rotation in
-                guard handTrackingEnabled, rotation != .zero else { return }
-                NotificationCenter.default.post(
-                    name: .handTrackingEdgeRotate,
-                    object: nil,
-                    userInfo: [
-                        "rotX": rotation.x,
-                        "rotY": rotation.y
+                        "headYaw": eyeTrackingService.headYaw,
+                        "headPitch": eyeTrackingService.headPitch
                     ]
                 )
             }
@@ -812,140 +713,36 @@ struct MetalKitSceneView: View {
             var cachedClusterFeatures: [[Float]] = []
 
 #if os(iOS)
-            /// Notification observers for tracking gestures
-            private var blinkObserver: NSObjectProtocol?
-            private var handSelectObserver: NSObjectProtocol?
-            private var handExplodeObserver: NSObjectProtocol?
-            private var edgeRotateObserver: NSObjectProtocol?
+            /// Notification observer for head-tracking scene rotation.
+            private var headRotateObserver: NSObjectProtocol?
             var deleteSelectedBinding: Binding<Bool>?
 
             func startListeningForGestures() {
-                guard blinkObserver == nil else { return }
-                blinkObserver = NotificationCenter.default.addObserver(
-                    forName: .eyeTrackingBlinkSelect,
+                guard headRotateObserver == nil else { return }
+                headRotateObserver = NotificationCenter.default.addObserver(
+                    forName: .headTrackingRotate,
                     object: nil,
                     queue: .main
                 ) { [weak self] notification in
-                    self?.handleCursorSelect(notification, xKey: "gazeX", yKey: "gazeY", label: "HeadTracking")
-                }
-                handSelectObserver = NotificationCenter.default.addObserver(
-                    forName: .handTrackingSelect,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    self?.handleCursorSelect(notification, xKey: "cursorX", yKey: "cursorY", label: "HandTracking")
-                }
-                handExplodeObserver = NotificationCenter.default.addObserver(
-                    forName: .handTrackingExplode,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    self?.handleExplode(notification)
-                }
-                edgeRotateObserver = NotificationCenter.default.addObserver(
-                    forName: .handTrackingEdgeRotate,
-                    object: nil,
-                    queue: .main
-                ) { [weak self] notification in
-                    self?.handleEdgeRotate(notification)
+                    self?.handleHeadRotate(notification)
                 }
             }
 
-            /// Shared handler: pick cluster at normalized cursor position and toggle selection.
-            private func handleCursorSelect(_ notification: Notification, xKey: String, yKey: String, label: String) {
+            /// Head tracking: map head yaw/pitch deltas (radians) to the renderer's
+            /// device-driven scene rotation, mirroring the gyroscope "fake depth" mode.
+            private func handleHeadRotate(_ notification: Notification) {
                 guard let renderer = renderer,
                       let userInfo = notification.userInfo,
-                      let cursorX = userInfo[xKey] as? CGFloat,
-                      let cursorY = userInfo[yKey] as? CGFloat else { return }
-
-                let drawableSize = renderer.drawableSize
-                let screenPoint = CGPoint(
-                    x: cursorX * drawableSize.width,
-                    y: cursorY * drawableSize.height
-                )
-
-                if let clusterID = renderer.pickClusterAt(screenPoint) {
-                    if isSelectingModeBinding?.wrappedValue == true {
-                        renderer.toggleClusterSelection(clusterID)
-                        selectedClusterCountBinding?.wrappedValue = renderer.selectedClusterCount
-                        print("[\(label)] Selected cluster \(clusterID) at (\(String(format: "%.2f", cursorX)), \(String(format: "%.2f", cursorY)))")
-                    }
-                }
-            }
-
-            /// Open palm: toggle cluster visibility at cursor.
-            /// If the cluster is already hidden, make it reappear.
-            /// If visible, hide it ("explode").
-            private func handleExplode(_ notification: Notification) {
-                guard let renderer = renderer,
-                      let userInfo = notification.userInfo,
-                      let cursorX = userInfo["cursorX"] as? CGFloat,
-                      let cursorY = userInfo["cursorY"] as? CGFloat else { return }
-
-                let drawableSize = renderer.drawableSize
-                let screenPoint = CGPoint(
-                    x: cursorX * drawableSize.width,
-                    y: cursorY * drawableSize.height
-                )
-
-                // Are we currently in hide mode with hidden clusters?
-                let isHideMode = (deleteSelectedBinding?.wrappedValue == true) && renderer.selectedClusterCount > 0
-
-                if isHideMode {
-                    // In hide mode: try to pick from hidden clusters.
-                    // Temporarily show all to pick, then re-hide.
-                    let savedMode = renderer.selectionMode
-                    let savedClusters = renderer.selectedClusters
-                    renderer.selectionMode = 0  // show all for picking
-
-                    if let clusterID = renderer.pickClusterAt(screenPoint) {
-                        let uid = UInt32(clusterID)
-                        if savedClusters.contains(uid) {
-                            // This cluster is hidden — remove from selection to make it reappear
-                            renderer.selectionMode = savedMode
-                            renderer.toggleClusterSelection(clusterID) // removes it
-                            selectedClusterCountBinding?.wrappedValue = renderer.selectedClusterCount
-                            if renderer.selectedClusterCount == 0 {
-                                // No more hidden clusters — exit hide mode
-                                deleteSelectedBinding?.wrappedValue = false
-                                renderer.selectionMode = 0
-                            }
-                            print("[HandTracking] Restored cluster \(clusterID)")
-                            return
-                        }
-                    }
-                    // Didn't hit a hidden cluster — restore state and fall through to hide
-                    renderer.selectionMode = savedMode
-                }
-
-                // Normal case: pick and hide
-                guard let clusterID = renderer.pickClusterAt(screenPoint) else { return }
-
-                if !renderer.selectedClusters.contains(UInt32(clusterID)) {
-                    renderer.toggleClusterSelection(clusterID)
-                }
-                renderer.selectionMode = 3  // hide/delete mode
-                selectedClusterCountBinding?.wrappedValue = renderer.selectedClusterCount
-                deleteSelectedBinding?.wrappedValue = true
-                isSelectingModeBinding?.wrappedValue = false
-                print("[HandTracking] Exploded cluster \(clusterID) at (\(String(format: "%.2f", cursorX)), \(String(format: "%.2f", cursorY)))")
-            }
-
-            /// Edge rotation: adjust renderer yaw/pitch when hand cursor is near screen edge.
-            private func handleEdgeRotate(_ notification: Notification) {
-                guard let renderer = renderer,
-                      let userInfo = notification.userInfo,
-                      let rotX = userInfo["rotX"] as? CGFloat,
-                      let rotY = userInfo["rotY"] as? CGFloat else { return }
-                renderer.yaw += Float(rotX)
-                renderer.pitch += Float(rotY)
+                      let headYaw = userInfo["headYaw"] as? Float,
+                      let headPitch = userInfo["headPitch"] as? Float else { return }
+                renderer.deviceYaw = -headYaw
+                renderer.devicePitch = -headPitch
+                renderer.deviceRoll = 0
             }
 
             deinit {
-                for observer in [blinkObserver, handSelectObserver, handExplodeObserver, edgeRotateObserver] {
-                    if let obs = observer {
-                        NotificationCenter.default.removeObserver(obs)
-                    }
+                if let obs = headRotateObserver {
+                    NotificationCenter.default.removeObserver(obs)
                 }
             }
 #endif
@@ -1366,9 +1163,9 @@ struct MetalKitSceneView: View {
                 case 125: // Down arrow — tilt device down (pitch)
                     targetPitch -= step
                 case 123: // Left arrow — tilt device left (yaw)
-                    targetYaw -= step
-                case 124: // Right arrow — tilt device right (yaw)
                     targetYaw += step
+                case 124: // Right arrow — tilt device right (yaw)
+                    targetYaw -= step
                 default:
                     super.keyDown(with: event)
                 }
@@ -1612,7 +1409,7 @@ struct MetalKitSceneView: View {
                             default:
                                 // Portrait
                                 renderer.devicePitch = -rawPitch
-                                renderer.deviceYaw = rawRoll
+                                renderer.deviceYaw = -rawRoll
                                 renderer.deviceRoll = -rawYaw
                             }
                         }

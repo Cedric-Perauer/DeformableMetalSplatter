@@ -4,21 +4,20 @@ import ARKit
 import Combine
 import simd
 
-/// Provides head-pose-based pointer and blink detection using ARKit face tracking (TrueDepth camera).
-/// The pointer position is derived from head yaw/pitch relative to the initial pose when tracking started.
-/// Blink (both eyes closed then reopened) triggers a selection event.
+/// Publishes smoothed head yaw/pitch deltas (in radians) relative to the pose captured on start,
+/// sourced from ARKit face tracking (TrueDepth camera). Consumers can feed these into a scene
+/// rotation controller to orbit the view in the same spirit as gyroscope-based "fake depth" mode.
 class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - Published state
 
-    /// Normalized pointer position on screen (0,0 = top-left, 1,1 = bottom-right).
-    @Published var gazePoint: CGPoint = CGPoint(x: 0.5, y: 0.5)
+    /// Smoothed head yaw delta in radians, relative to the reference pose (positive = head turns left
+    /// in the device's native portrait frame).
+    @Published var headYaw: Float = 0
 
-    /// True while both eyes are detected as blinking.
-    @Published var isBlinking: Bool = false
-
-    /// True if a blink-select event just fired (resets automatically).
-    @Published var didBlink: Bool = false
+    /// Smoothed head pitch delta in radians, relative to the reference pose (positive = head tilts up
+    /// in the device's native portrait frame).
+    @Published var headPitch: Float = 0
 
     /// Whether the service is actively running.
     @Published var isRunning: Bool = false
@@ -30,38 +29,20 @@ class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
 
     // MARK: - Configuration
 
-    /// Blend-shape threshold above which we consider the eye closed.
-    var blinkThreshold: Float = 0.6
-
-    /// Minimum seconds between blink-select triggers to avoid rapid-fire.
-    var blinkCooldown: TimeInterval = 0.8
-
-    /// Smoothing factor for pointer (0 = no smoothing, 1 = frozen).
+    /// Smoothing factor (0 = no smoothing, 1 = frozen).
     var smoothingFactor: Float = 0.6
-
-    /// How many degrees of head turn maps to full screen width/height.
-    /// Smaller = more sensitive, larger = need bigger head movements.
-    var degreesForFullScreen: Float = 30.0
-
-    /// Current interface orientation — set by the caller so we can remap axes for landscape.
-    var interfaceOrientation: UIInterfaceOrientation = .portrait
 
     // MARK: - Private
 
     private let session = ARSession()
-    private var lastBlinkTime: TimeInterval = 0
-    private var wasBlinking = false
 
-    // Reference pose captured on start (center of screen)
+    // Reference pose captured on start
     private var referenceYaw: Float?
     private var referencePitch: Float?
 
-    // Smoothed normalized values
-    private var smoothedX: Float = 0.5
-    private var smoothedY: Float = 0.5
-
-    // Screen size (unused in head-tracking mode but kept for potential calibration)
-    var screenSize: CGSize = CGSize(width: 390, height: 844)
+    // Smoothed radian deltas
+    private var smoothedYaw: Float = 0
+    private var smoothedPitch: Float = 0
 
     // MARK: - Lifecycle
 
@@ -75,11 +56,10 @@ class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
             print("[HeadTracking] ARFaceTracking not supported on this device")
             return
         }
-        // Reset reference so the first frame captures current head pose as center
         referenceYaw = nil
         referencePitch = nil
-        smoothedX = 0.5
-        smoothedY = 0.5
+        smoothedYaw = 0
+        smoothedPitch = 0
 
         let config = ARFaceTrackingConfiguration()
         if ARFaceTrackingConfiguration.supportsWorldTracking {
@@ -93,20 +73,21 @@ class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
     func stop() {
         session.pause()
         isRunning = false
-        isBlinking = false
-        didBlink = false
-        wasBlinking = false
         referenceYaw = nil
         referencePitch = nil
+        DispatchQueue.main.async {
+            self.headYaw = 0
+            self.headPitch = 0
+        }
         print("[HeadTracking] Stopped face tracking session")
     }
 
-    /// Re-center the pointer to the current head position.
+    /// Re-anchor the reference pose to the current head position.
     func recenter() {
         referenceYaw = nil
         referencePitch = nil
-        smoothedX = 0.5
-        smoothedY = 0.5
+        smoothedYaw = 0
+        smoothedPitch = 0
     }
 
     // MARK: - ARSessionDelegate
@@ -114,18 +95,10 @@ class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
     func session(_ session: ARSession, didUpdate anchors: [ARAnchor]) {
         guard let faceAnchor = anchors.compactMap({ $0 as? ARFaceAnchor }).first else { return }
 
-        // Update orientation each frame so rotation mid-session works
-        if let scene = UIApplication.shared.connectedScenes.first as? UIWindowScene {
-            interfaceOrientation = scene.interfaceOrientation
-        }
-
-        // --- Head pose → pointer ---
-        // Extract yaw and pitch from the face anchor's world transform.
         let transform = faceAnchor.transform
-        let yaw = atan2(transform.columns.0.z, transform.columns.2.z)   // left/right turn
-        let pitch = asin(-transform.columns.1.z)                         // up/down nod
+        let yaw = atan2(transform.columns.0.z, transform.columns.2.z)
+        let pitch = asin(-transform.columns.1.z)
 
-        // Capture initial pose as the reference (screen center)
         if referenceYaw == nil {
             referenceYaw = yaw
             referencePitch = pitch
@@ -134,62 +107,14 @@ class EyeTrackingService: NSObject, ObservableObject, ARSessionDelegate {
         let deltaYaw = yaw - (referenceYaw ?? yaw)
         let deltaPitch = pitch - (referencePitch ?? pitch)
 
-        // Remap head yaw/pitch to screen horizontal/vertical based on device orientation.
-        // ARKit face tracking always reports in the camera's native (portrait) frame.
-        // In landscape the screen axes are rotated relative to the head axes.
-        let screenH: Float  // positive = pointer moves right on screen
-        let screenV: Float  // positive = pointer moves down on screen
-        switch interfaceOrientation {
-        case .landscapeLeft:
-            // Home button on left: head turn right → cursor right, head nod down → cursor down
-            screenH = -deltaYaw
-            screenV = -deltaPitch
-        case .landscapeRight:
-            // Home button on right: head turn right → cursor right, head nod down → cursor down
-            screenH = -deltaYaw
-            screenV = -deltaPitch
-        case .portraitUpsideDown:
-            screenH = -deltaYaw
-            screenV = deltaPitch
-        default:
-            // Portrait
-            screenH = -deltaYaw
-            screenV = -deltaPitch
-        }
+        smoothedYaw = smoothedYaw * smoothingFactor + deltaYaw * (1.0 - smoothingFactor)
+        smoothedPitch = smoothedPitch * smoothingFactor + deltaPitch * (1.0 - smoothingFactor)
 
-        let range = degreesForFullScreen * .pi / 180.0
-        let rawX = 0.5 + (screenH / range) * 0.5
-        let rawY = 0.5 + (screenV / range) * 0.5
-
-        // Exponential smoothing
-        smoothedX = smoothedX * smoothingFactor + rawX * (1.0 - smoothingFactor)
-        smoothedY = smoothedY * smoothingFactor + rawY * (1.0 - smoothingFactor)
-
-        let clampedX = max(0.0, min(1.0, smoothedX))
-        let clampedY = max(0.0, min(1.0, smoothedY))
-
-        // --- Blink detection ---
-        let blendShapes = faceAnchor.blendShapes
-        let leftBlink = (blendShapes[.eyeBlinkLeft]?.floatValue) ?? 0
-        let rightBlink = (blendShapes[.eyeBlinkRight]?.floatValue) ?? 0
-        let bothClosed = leftBlink > blinkThreshold && rightBlink > blinkThreshold
-        let now = CACurrentMediaTime()
-
+        let outYaw = smoothedYaw
+        let outPitch = smoothedPitch
         DispatchQueue.main.async {
-            self.gazePoint = CGPoint(x: CGFloat(clampedX), y: CGFloat(clampedY))
-            self.isBlinking = bothClosed
-
-            // Trigger on blink release (eyes reopen after being closed)
-            if self.wasBlinking && !bothClosed {
-                if now - self.lastBlinkTime > self.blinkCooldown {
-                    self.lastBlinkTime = now
-                    self.didBlink = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        self.didBlink = false
-                    }
-                }
-            }
-            self.wasBlinking = bothClosed
+            self.headYaw = outYaw
+            self.headPitch = outPitch
         }
     }
 
