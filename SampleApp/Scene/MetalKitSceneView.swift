@@ -73,6 +73,10 @@ struct MetalKitSceneView: View {
     @StateObject private var eyeTrackingService = EyeTrackingService()
     @State private var eyeTrackingEnabled: Bool = false
 
+    // Mirror of the renderer's device (IMU / arrow-key) yaw+pitch for the overlay.
+    @State private var imuYaw: Float = 0
+    @State private var imuPitch: Float = 0
+
     private let coordinateModeLabels = ["Default", "Z→Y", "Y→Z", "None"]
     
     @ViewBuilder
@@ -204,6 +208,106 @@ struct MetalKitSceneView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
             .padding(.top, 60)
             .padding(.trailing, 16)
+        }
+    }
+
+    /// Shared crosshair pad that visualises a yaw/pitch pair (in radians) as a moving dot.
+    @ViewBuilder
+    private func orientationPad(yaw: Float, pitch: Float, tint: Color,
+                                pitchSign: CGFloat, label: String) -> some View {
+        // ~0.6 rad (≈35°) saturates the edge — comfortable head-turn / device-tilt range.
+        let range: Float = 0.6
+        let nx = max(-1, min(1, yaw / range))
+        let ny = max(-1, min(1, pitch / range))
+        let padSize: CGFloat = 96
+
+        VStack(alignment: .trailing, spacing: 4) {
+            Text(label)
+                .font(.system(size: 9, weight: .semibold, design: .monospaced))
+                .foregroundStyle(tint.opacity(0.9))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.black.opacity(0.45))
+                .cornerRadius(4)
+
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.black.opacity(0.45))
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(tint.opacity(0.6), lineWidth: 1)
+
+                Path { path in
+                    path.move(to: CGPoint(x: padSize / 2, y: 6))
+                    path.addLine(to: CGPoint(x: padSize / 2, y: padSize - 6))
+                    path.move(to: CGPoint(x: 6, y: padSize / 2))
+                    path.addLine(to: CGPoint(x: padSize - 6, y: padSize / 2))
+                }
+                .stroke(Color.white.opacity(0.25), lineWidth: 1)
+
+                Circle()
+                    .fill(Color.white.opacity(0.35))
+                    .frame(width: 4, height: 4)
+
+                Circle()
+                    .fill(tint)
+                    .frame(width: 10, height: 10)
+                    .shadow(color: tint.opacity(0.8), radius: 4)
+                    .offset(x: CGFloat(nx) * (padSize / 2 - 8),
+                            y: pitchSign * CGFloat(ny) * (padSize / 2 - 8))
+                    .animation(.linear(duration: 0.05), value: yaw)
+                    .animation(.linear(duration: 0.05), value: pitch)
+            }
+            .frame(width: padSize, height: padSize)
+
+            Text(String(format: "yaw %+.0f°  pitch %+.0f°",
+                        yaw * 180 / .pi, pitch * 180 / .pi))
+                .font(.system(size: 10, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.8))
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.black.opacity(0.45))
+                .cornerRadius(4)
+        }
+    }
+
+    @ViewBuilder
+    private var headTrackingIndicator: some View {
+        if eyeTrackingEnabled && eyeTrackingService.isRunning {
+            // macOS Vision reports pitch with flipped sign vs ARKit on iOS, so
+            // invert again on Mac to keep "look up = dot up" semantics.
+            #if os(macOS)
+            let pitchSign: CGFloat = 1
+            #else
+            let pitchSign: CGFloat = -1
+            #endif
+            orientationPad(yaw: eyeTrackingService.headYaw,
+                           pitch: eyeTrackingService.headPitch,
+                           tint: .purple,
+                           pitchSign: pitchSign,
+                           label: "HEAD")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 16)
+                .padding(.bottom, 16)
+                .allowsHitTesting(false)
+                .transition(.opacity)
+        }
+    }
+
+    @ViewBuilder
+    private var imuIndicator: some View {
+        if useDeviceRotation {
+            // renderer.devicePitch is already sign-normalized so positive = "looking up"
+            // (iOS portrait: -rawPitch; macOS arrow keys: +step on up-arrow).
+            orientationPad(yaw: imuYaw,
+                           pitch: imuPitch,
+                           tint: .blue,
+                           pitchSign: -1,
+                           label: "TILT")
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 16)
+                .padding(.bottom, 16)
+                .allowsHitTesting(false)
+                .transition(.opacity)
         }
     }
 
@@ -541,7 +645,9 @@ struct MetalKitSceneView: View {
                   totalSplatCount: $totalSplatCount,
                   saveMaskRequest: $saveMaskRequest,
                   recommendedMaskPercentage: $recommendedMaskPercentage,
-                  useDeviceRotation: $useDeviceRotation)
+                  useDeviceRotation: $useDeviceRotation,
+                  imuYaw: $imuYaw,
+                  imuPitch: $imuPitch)
         .ignoresSafeArea()
         .onChange(of: hasClusters) { _, newValue in
             if !newValue && showClusterColors {
@@ -598,7 +704,8 @@ struct MetalKitSceneView: View {
 
                 encodingStatusOverlay
 
-                // Head tracking cursor overlay
+                headTrackingIndicator
+                imuIndicator
             }
             .onChange(of: eyeTrackingEnabled) { _, enabled in
                 if enabled {
@@ -659,6 +766,8 @@ struct MetalKitSceneView: View {
         @Binding var saveMaskRequest: Bool
         @Binding var recommendedMaskPercentage: Double?
         @Binding var useDeviceRotation: Bool
+        @Binding var imuYaw: Float
+        @Binding var imuPitch: Float
         
         class Coordinator: NSObject {
             var renderer: MetalKitSceneRenderer?
@@ -693,6 +802,8 @@ struct MetalKitSceneView: View {
             var deformedSplatCountBinding: Binding<Int>?
             var totalSplatCountBinding: Binding<Int>?
             var recommendedMaskPercentageBinding: Binding<Double?>?
+            var imuYawBinding: Binding<Float>?
+            var imuPitchBinding: Binding<Float>?
             /// Tracks last query text to avoid redundant queries
             var lastQueryText: String = ""
             /// Cached CLIP features to survive renderer/view lifecycle resets
@@ -901,6 +1012,8 @@ struct MetalKitSceneView: View {
             coordinator.deformedSplatCountBinding = $deformedSplatCount
             coordinator.totalSplatCountBinding = $totalSplatCount
             coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
+            coordinator.imuYawBinding = $imuYaw
+            coordinator.imuPitchBinding = $imuPitch
             #if os(iOS)
             coordinator.deleteSelectedBinding = $deleteSelected
             #endif
@@ -1004,7 +1117,9 @@ struct MetalKitSceneView: View {
             context.coordinator.searchRequestBinding = $searchRequest
             context.coordinator.queryStatusTextBinding = $queryStatusText
             context.coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
-            
+            context.coordinator.imuYawBinding = $imuYaw
+            context.coordinator.imuPitchBinding = $imuPitch
+
             if let showClusterColors {
                 context.coordinator.renderer?.showClusterColors = showClusterColors
             }
@@ -1098,6 +1213,8 @@ struct MetalKitSceneView: View {
                     context.coordinator.renderer?.devicePitch = 0
                     context.coordinator.renderer?.deviceRoll = 0
                     context.coordinator.renderer?.deviceYaw = 0
+                    imuYaw = 0
+                    imuPitch = 0
                 }
             }
 
@@ -1140,6 +1257,13 @@ struct MetalKitSceneView: View {
                 let smoothing: Float = 0.08
                 renderer.devicePitch += (targetPitch - renderer.devicePitch) * smoothing
                 renderer.deviceYaw += (targetYaw - renderer.deviceYaw) * smoothing
+
+                let pitch = renderer.devicePitch
+                let yaw = renderer.deviceYaw
+                DispatchQueue.main.async { [weak self] in
+                    self?.coordinator?.imuYawBinding?.wrappedValue = yaw
+                    self?.coordinator?.imuPitchBinding?.wrappedValue = pitch
+                }
             }
 
             // Arrow keys simulate device tilt (fake depth) on macOS
@@ -1283,7 +1407,9 @@ struct MetalKitSceneView: View {
             context.coordinator.searchRequestBinding = $searchRequest
             context.coordinator.queryStatusTextBinding = $queryStatusText
             context.coordinator.recommendedMaskPercentageBinding = $recommendedMaskPercentage
-            
+            context.coordinator.imuYawBinding = $imuYaw
+            context.coordinator.imuPitchBinding = $imuPitch
+
             if let showClusterColors {
                 context.coordinator.renderer?.showClusterColors = showClusterColors
             }
@@ -1404,6 +1530,11 @@ struct MetalKitSceneView: View {
                                 renderer.deviceYaw = -rawRoll
                                 renderer.deviceRoll = -rawYaw
                             }
+
+                            // Mirror current IMU-driven scene rotation into SwiftUI state
+                            // so the bottom-right orientation pad can render it.
+                            context.coordinator.imuYawBinding?.wrappedValue = renderer.deviceYaw
+                            context.coordinator.imuPitchBinding?.wrappedValue = renderer.devicePitch
                         }
                     }
                 }
@@ -1413,6 +1544,8 @@ struct MetalKitSceneView: View {
                     context.coordinator.renderer?.devicePitch = 0
                     context.coordinator.renderer?.deviceRoll = 0
                     context.coordinator.renderer?.deviceYaw = 0
+                    context.coordinator.imuYawBinding?.wrappedValue = 0
+                    context.coordinator.imuPitchBinding?.wrappedValue = 0
                 }
             }
             
